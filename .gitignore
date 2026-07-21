@@ -35,12 +35,17 @@
 *.i*86
 *.x86_64
 *.hex
+*.3dsx
 
 # Debug files
 *.dSYM/
 *.su
 *.idb
 *.pdb
+*.lst
+
+# 3DS icon file
+*.smdh
 
 # Kernel Module Compile Results
 *.mod*
@@ -50,3 +55,6 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Intellij bullshit
+/.idea/

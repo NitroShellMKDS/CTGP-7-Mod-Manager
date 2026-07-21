@@ -22,6 +22,9 @@ static const char *API_CORE_DATA = "https://api.gamebanana.com/Core/Item/Data";
 static const int CATEGORIES[] = {35931, 10605, 35932, 35943, 35933, 35935, 35937, 35938, 35939, 35941, 35942, 35944, 35946, 35947, 35945, 35940, 35934, 35936};
 static const int NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 
+static const bool log_to_file = false;
+#define log_loc "sdmc:/3ds/CTGP-7-Mod-Manager/output.log"
+
 #define MAX_PATH 512
 #define MAX_URL 2048
 
@@ -438,6 +441,10 @@ int main(int argc, char **argv) {
     gfxInitDefault();
     consoleInit(GFX_TOP, NULL);
     printf("\x1b[1;1HGamebananaFetcher 3DS Port\n");
+    if (log_to_file) {
+        printf("Logging to " log_loc "\n");
+        freopen(log_loc, "w", stdout);
+    }
 
     socBuffer = (u32*)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
     if (!socBuffer) {
@@ -518,5 +525,6 @@ exit_soc_fail:
 exit_no_soc:
     
     gfxExit();
+    fflush(stdout);
     return 0;
 }

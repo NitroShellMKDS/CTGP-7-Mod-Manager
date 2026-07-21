@@ -1,0 +1,3 @@
+[submodule "deps/imgui-3ds"]
+	path = deps/imgui-3ds
+	url = https://github.com/hax0kartik/imgui-3ds
