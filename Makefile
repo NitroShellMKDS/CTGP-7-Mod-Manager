@@ -11,9 +11,9 @@ include $(DEVKITARM)/3ds_rules
 
 TARGET		:=	$(notdir $(CURDIR))
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source deps/imgui-3ds/imgui deps/imgui_citro3d
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include deps/imgui-3ds/imgui deps/imgui_citro3d
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 
@@ -23,7 +23,7 @@ GFXBUILD	:=	$(BUILD)
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
 CFLAGS	:=	-g -Wall -O2 -mword-relocations \
-			-ffunction-sections \
+			-ffunction-sections -fpermissive \
 			$(ARCH)
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__
@@ -38,7 +38,7 @@ LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 # [FIX]: Reordered libs. Dependencies must be listed left-to-right. 
 # libcurl -> mbedtls -> libctru (soc/sslc)
-LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -lz -lctru -lm
+LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -lz -lcitro3d -lctru -lm
 
 LIBDIRS	:= $(PORTLIBS) $(CTRULIB)
 

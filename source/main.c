@@ -1,4 +1,5 @@
 #include <3ds.h>
+#include <citro3d.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 #include <stdio.h>
@@ -22,7 +23,7 @@ static const char *API_CORE_DATA = "https://api.gamebanana.com/Core/Item/Data";
 static const int CATEGORIES[] = {35931, 10605, 35932, 35943, 35933, 35935, 35937, 35938, 35939, 35941, 35942, 35944, 35946, 35947, 35945, 35940, 35934, 35936};
 static const int NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 
-static const bool log_to_file = false;
+static const bool log_to_file = true;
 
 #define MAX_PATH 512
 #define MAX_URL 2048
@@ -512,15 +513,19 @@ static void fetch_core_data(ModData *mods, int count) {
     free(unique);
 }
 
+extern int gui(); // gui.cpp
+
 int main(int argc, char **argv) {
-    gfxInitDefault();
-    consoleInit(GFX_TOP, NULL);
     printf("\x1b[1;1HGamebananaFetcher 3DS Port\n");
     if (log_to_file) {
         // this doesn't need a str substitution but i'm leaving it here incase
         printf("Logging to %s\n", LOG_FILE);
         freopen(LOG_FILE, "w", stdout);
     }
+
+    if (gui()) goto exit_no_gui;
+
+    // below here needs to be on another thread
 
     socBuffer = (u32*)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
     if (!socBuffer) {
@@ -583,12 +588,12 @@ int main(int argc, char **argv) {
         printf("Failed to fetch any mods!\n");
     }
 
-    printf("\nPress START to exit.\n");
+    // above here needs to be on another thread
 
     while (aptMainLoop()) {
         gspWaitForVBlank();
         hidScanInput();
-        if (hidKeysDown() & KEY_START) break;
+        // TODO move this to gui.cpp
     }
 
     curl_global_cleanup();
@@ -600,6 +605,7 @@ exit_sslc_fail:
 exit_soc_fail:
     free(socBuffer);
 exit_no_soc:
+exit_no_gui:
     
     gfxExit();
     fflush(stdout);
