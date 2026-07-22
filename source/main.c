@@ -414,11 +414,11 @@ static void parse_latest_file(json_object *item, ModData *mod) {
         }
     }
 
-    if (json_object_get_type(files) != json_type_object) return;
+    if (json_object_get_type(item) != json_type_object) return;
 
     long long max_ts = 0;
 
-    json_object_object_foreach(files, key, file_obj) {
+    json_object_object_foreach(item, key, file_obj) {
         (void)key;
         if (file_obj && json_object_get_type(file_obj) == json_type_object) {
             const char *sfile = get_json_string(file_obj, "_sFile");
