@@ -1,4 +1,3 @@
-#define _XOPEN_SOURCE 500
 #include <3ds.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
@@ -11,7 +10,6 @@
 #include <inttypes.h>
 #include <errno.h>
 #include <malloc.h>
-#include <ftw.h>
 
 #define SOC_ALIGN       0x1000
 #define SOC_BUFFERSIZE  0x100000
@@ -60,16 +58,6 @@ typedef struct {
     long response_code;
     bool success;
 } FetchResult;
-
-//int unlink_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
-//{
-//    int rv = remove(fpath);
-//
-//    if (rv)
-//        perror(fpath);
-//
-//    return rv;
-//}
 
 // recursive delete because newlib does not have POSIX extensions
 // Kagi Assistant, audited for errors
@@ -378,6 +366,43 @@ static int compare_mods_by_id(const void *a, const void *b) {
     return ((const ModData *)a)->Id - ((const ModData *)b)->Id;
 }
 
+static int deduplicate_mods(ModData *mods, int count) {
+    if (count <= 1) return count;
+
+    int unique_count = 0;
+    for (int i = count - 1; i >= 0; i--) {
+        int found = 0;
+        for (int j = i + 1; j < count; j++) {
+            if (mods[j].Id == mods[i].Id) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) unique_count++;
+    }
+
+    ModData *unique = (ModData *)malloc(sizeof(ModData) * unique_count);
+    if (!unique) return count;
+
+    int ui = unique_count - 1;
+    for (int i = count - 1; i >= 0; i--) {
+        int found = 0;
+        for (int j = i + 1; j < count; j++) {
+            if (mods[j].Id == mods[i].Id) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            unique[ui--] = mods[i];
+        }
+    }
+
+    memcpy(mods, unique, sizeof(ModData) * unique_count);
+    free(unique);
+    return unique_count;
+}
+
 static void parse_latest_file(json_object *item, ModData *mod) {
     json_object *files;
     if (!json_object_object_get_ex(item, "Files().aFiles()", &files)) return;
@@ -523,8 +548,6 @@ int main(int argc, char **argv) {
     }
 
     ensure_directories();
-    //nftw(CACHE_DIR, unlink_cb, MAX_FTW_DESCRIPTORS, FTW_DEPTH | FTW_PHYS); // recursive delete
-    // this doesn't work on 3DS because the standard library is RedHat newlib (shit...), try something else:
     rmrf(CACHE_DIR);
     
     printf("Fetching %d categories...\n", NUM_CATEGORIES);
@@ -550,6 +573,7 @@ int main(int argc, char **argv) {
     }
 
     if (total_count > 0 && all_mods) {
+        total_count = deduplicate_mods(all_mods, total_count); // ???
         printf("Total mods fetched: %d\n", total_count);
         qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_id);
         
