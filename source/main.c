@@ -1,4 +1,3 @@
-#define _XOPEN_SOURCE 500
 #include <3ds.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
@@ -11,7 +10,6 @@
 #include <inttypes.h>
 #include <errno.h>
 #include <malloc.h>
-#include <ftw.h>
 
 #define SOC_ALIGN       0x1000
 #define SOC_BUFFERSIZE  0x100000
@@ -25,23 +23,21 @@ static const int CATEGORIES[] = {35931, 10605, 35932, 35943, 35933, 35935, 35937
 static const int NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 
 static const bool log_to_file = false;
+#define log_loc "sdmc:/3ds/CTGP-7-Mod-Manager/output.log"
 
 #define MAX_PATH 512
 #define MAX_URL 2048
-#define MAX_FTW_DESCRIPTORS 128
 
-#define BASE_DIR "sdmc:/"
-#define APP_DIR BASE_DIR "3ds/CTGP-7-Mod-Manager/"
-#define CACHE_DIR APP_DIR "cache/"
-#define LISTS_DIR CACHE_DIR "lists/"
-#define THUMBNAIL_CACHE_DIR CACHE_DIR "images/"
-#define CTGP7_DIR BASE_DIR "CTGP-7/MyStuff/Characters/"
-
-#define STATE_FILE APP_DIR "installed_mods.json"
-#define LOG_FILE APP_DIR "log.txt"
-#define MOD_LIST_FILE LISTS_DIR "modlist.json"
-#define BY_NAME_FILE LISTS_DIR "byname.json"
-#define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
+static char BASE_DIR[MAX_PATH];
+static char APP_DIR[MAX_PATH];
+static char CTGP7_DIR[MAX_PATH];
+static char STATE_FILE[MAX_PATH];
+static char LOG_FILE[MAX_PATH];
+static char LISTS_DIR[MAX_PATH];
+static char MOD_LIST_FILE[MAX_PATH];
+static char BY_NAME_FILE[MAX_PATH];
+static char BY_UPDATED_FILE[MAX_PATH];
+static char THUMBNAIL_CACHE_DIR[MAX_PATH];
 
 typedef struct {
     int Id;
@@ -61,68 +57,17 @@ typedef struct {
     bool success;
 } FetchResult;
 
-//int unlink_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
-//{
-//    int rv = remove(fpath);
-//
-//    if (rv)
-//        perror(fpath);
-//
-//    return rv;
-//}
-
-// recursive delete because newlib does not have POSIX extensions
-// Kagi Assistant, audited for errors
-static int rmrf(const char *path) {
-    DIR *d = opendir(path);
-    if (!d) {
-        perror("opendir");
-        return -1;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-
-        char fullpath[1024];
-        const char *sep = "/";
-        size_t len = strlen(path);
-        if (len > 0 && path[len - 1] == '/') {
-            sep = "";
-        }
-
-        snprintf(fullpath, sizeof(fullpath), "%s%s%s", path, sep, entry->d_name);
-
-        struct stat st;
-        if (stat(fullpath, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                if (rmrf(fullpath) != 0) {
-                    closedir(d);
-                    return -1;
-                }
-            } else {
-                if (unlink(fullpath) != 0) {
-                    perror("unlink");
-                    closedir(d);
-                    return -1;
-                }
-            }
-        } else {
-            perror(fullpath); // failing here is normal, but we print the path incase our str building is wrong
-            closedir(d);
-            return -1;
-        }
-    }
-
-    closedir(d);
-
-    if (rmdir(path) != 0) {
-        perror("rmdir");
-        return -1;
-    }
-
-    return 0;
+static void init_paths(void) {
+    snprintf(BASE_DIR, sizeof(BASE_DIR), "sdmc:/");
+    snprintf(APP_DIR, sizeof(APP_DIR), "sdmc:/3ds/CTGP-7-Mod-Manager");
+    snprintf(CTGP7_DIR, sizeof(CTGP7_DIR), "sdmc:/CTGP-7/MyStuff/Characters");
+    snprintf(STATE_FILE, sizeof(STATE_FILE), "sdmc:/3ds/CTGP-7-Mod-Manager/installed_mods.json");
+    snprintf(LOG_FILE, sizeof(LOG_FILE), "sdmc:/3ds/CTGP-7-Mod-Manager/log.txt");
+    snprintf(LISTS_DIR, sizeof(LISTS_DIR), "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists");
+    snprintf(MOD_LIST_FILE, sizeof(MOD_LIST_FILE), "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists/modlist.json");
+    snprintf(BY_NAME_FILE, sizeof(BY_NAME_FILE), "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists/byname.json");
+    snprintf(BY_UPDATED_FILE, sizeof(BY_UPDATED_FILE), "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists/byupdated.json");
+    snprintf(THUMBNAIL_CACHE_DIR, sizeof(THUMBNAIL_CACHE_DIR), "sdmc:/3ds/CTGP-7-Mod-Manager/cache/images");
 }
 
 static void mkdir_p(const char *path) {
@@ -150,6 +95,34 @@ static void ensure_directories(void) {
     mkdir_p(LISTS_DIR);
     mkdir_p(THUMBNAIL_CACHE_DIR);
     mkdir_p(CTGP7_DIR);
+}
+
+static void cleanup(void) {
+    remove(LOG_FILE);
+
+    DIR *d = opendir(LISTS_DIR);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            char path[MAX_PATH + 2 + 256];
+            snprintf(path, sizeof(path), "%s/%s", LISTS_DIR, ent->d_name);
+            remove(path);
+        }
+        closedir(d);
+    }
+
+    d = opendir(THUMBNAIL_CACHE_DIR);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            char path[MAX_PATH + 2 + 256];
+            snprintf(path, sizeof(path), "%s/%s", THUMBNAIL_CACHE_DIR, ent->d_name);
+            remove(path);
+        }
+        closedir(d);
+    }
+
+    ensure_directories();
 }
 
 static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -378,19 +351,52 @@ static int compare_mods_by_id(const void *a, const void *b) {
     return ((const ModData *)a)->Id - ((const ModData *)b)->Id;
 }
 
+static int deduplicate_mods(ModData *mods, int count) {
+    if (count <= 1) return count;
+
+    int unique_count = 0;
+    for (int i = count - 1; i >= 0; i--) {
+        int found = 0;
+        for (int j = i + 1; j < count; j++) {
+            if (mods[j].Id == mods[i].Id) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) unique_count++;
+    }
+
+    ModData *unique = (ModData *)malloc(sizeof(ModData) * unique_count);
+    if (!unique) return count;
+
+    int ui = unique_count - 1;
+    for (int i = count - 1; i >= 0; i--) {
+        int found = 0;
+        for (int j = i + 1; j < count; j++) {
+            if (mods[j].Id == mods[i].Id) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            unique[ui--] = mods[i];
+        }
+    }
+
+    memcpy(mods, unique, sizeof(ModData) * unique_count);
+    free(unique);
+    return unique_count;
+}
+
 static void parse_latest_file(json_object *item, ModData *mod) {
-    json_object *files;
-    if (!json_object_object_get_ex(item, "Files().aFiles()", &files)) return;
+    json_object *files = item;
 
     if (json_object_get_type(files) == json_type_array) {
         int arr_len = json_object_array_length(files);
         if (arr_len > 0) {
-            json_object *first = json_object_array_get_idx(files, 0);
-            if (first && json_object_get_type(first) == json_type_object) {
-                files = first;
-            } else {
-                return;
-            }
+            files = json_object_array_get_idx(files, 0);
+        } else {
+            return;
         }
     }
 
@@ -439,8 +445,6 @@ static void fetch_core_data(ModData *mods, int count) {
         ModData* batch_ptrs[BATCH_SIZE];
         
         for (int j = 0; j < BATCH_SIZE && (i + j) < unique_count; j++) {
-            if (unique[i+j].LatestFileUrl[0]) continue;
-            
             int added = snprintf(url + url_len, sizeof(url) - url_len, 
                 "itemtype[]=Mod&itemid[]=%d&fields[]=Files().aFiles()&", unique[i+j].Id);
             
@@ -497,9 +501,8 @@ int main(int argc, char **argv) {
     consoleInit(GFX_TOP, NULL);
     printf("\x1b[1;1HGamebananaFetcher 3DS Port\n");
     if (log_to_file) {
-        // this doesn't need a str substitution but i'm leaving it here incase
-        printf("Logging to %s\n", LOG_FILE);
-        freopen(LOG_FILE, "w", stdout);
+        printf("Logging to " log_loc "\n");
+        freopen(log_loc, "w", stdout);
     }
 
     socBuffer = (u32*)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
@@ -522,11 +525,9 @@ int main(int argc, char **argv) {
         goto exit_curl_fail;
     }
 
-    ensure_directories();
-    //nftw(CACHE_DIR, unlink_cb, MAX_FTW_DESCRIPTORS, FTW_DEPTH | FTW_PHYS); // recursive delete
-    // this doesn't work on 3DS because the standard library is RedHat newlib (shit...), try something else:
-    rmrf(CACHE_DIR);
-    
+    init_paths();
+    cleanup();
+
     printf("Fetching %d categories...\n", NUM_CATEGORIES);
 
     ModData *all_mods = NULL;
@@ -547,6 +548,10 @@ int main(int argc, char **argv) {
             total_count += cat_count;
             free(cat_mods);
         }
+    }
+
+    if (total_count > 0 && all_mods) {
+        total_count = deduplicate_mods(all_mods, total_count);
     }
 
     if (total_count > 0 && all_mods) {
@@ -584,6 +589,5 @@ exit_no_soc:
     
     gfxExit();
     fflush(stdout);
-    rmrf(CACHE_DIR);
     return 0;
 }
