@@ -133,7 +133,7 @@ static void mkdir_p(const char *path) {
     mkdir(buf, 0777);
 }
 
-static void ensure_directories(void) {
+static void init_paths(void) {
     mkdir_p(APP_DIR);
     mkdir_p(LISTS_DIR);
     mkdir_p(THUMBNAIL_CACHE_DIR);
@@ -404,18 +404,13 @@ static int deduplicate_mods(ModData *mods, int count) {
 }
 
 static void parse_latest_file(json_object *item, ModData *mod) {
-    json_object *files;
-    if (!json_object_object_get_ex(item, "Files().aFiles()", &files)) return;
-
-    if (json_object_get_type(files) == json_type_array) {
-        int arr_len = json_object_array_length(files);
+    if (json_object_get_type(item) == json_type_array) {
+        int arr_len = json_object_array_length(item);
         if (arr_len > 0) {
-            json_object *first = json_object_array_get_idx(files, 0);
-            if (first && json_object_get_type(first) == json_type_object) {
-                files = first;
-            } else {
-                return;
-            }
+            // nitro, please comment what this change fixes and how
+            item = json_object_array_get_idx(item, 0);
+        } else {
+            return;
         }
     }
 
@@ -547,7 +542,7 @@ int main(int argc, char **argv) {
         goto exit_curl_fail;
     }
 
-    ensure_directories();
+    init_paths();
     rmrf(CACHE_DIR);
     
     printf("Fetching %d categories...\n", NUM_CATEGORIES);
