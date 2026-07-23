@@ -10,6 +10,7 @@
 #include <inttypes.h>
 #include <errno.h>
 #include <malloc.h>
+#include <stdarg.h>
 
 #define SOC_ALIGN       0x1000
 #define SOC_BUFFERSIZE  0x100000
@@ -60,11 +61,11 @@ typedef struct {
 } FetchResult;
 
 // recursive delete because newlib does not have POSIX extensions
-// Kagi Assistant, audited for errors
+// Kagi Assistant, audited for errors, silenced for clean UI
 static int rmrf(const char *path) {
     DIR *d = opendir(path);
     if (!d) {
-        perror("opendir");
+        // Silently fail if the directory doesn't exist
         return -1;
     }
 
@@ -91,13 +92,11 @@ static int rmrf(const char *path) {
                 }
             } else {
                 if (unlink(fullpath) != 0) {
-                    perror("unlink");
                     closedir(d);
                     return -1;
                 }
             }
         } else {
-            perror(fullpath); // failing here is normal, but we print the path incase our str building is wrong
             closedir(d);
             return -1;
         }
@@ -106,7 +105,6 @@ static int rmrf(const char *path) {
     closedir(d);
 
     if (rmdir(path) != 0) {
-        perror("rmdir");
         return -1;
     }
 
@@ -434,6 +432,29 @@ static void parse_latest_file(json_object *item, ModData *mod) {
     }
 }
 
+// Calculates center alignment and updates a single line in-place
+static void print_status(const char* format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    // Standard 3DS bottom screen is 40 characters wide (320px / 8px font).
+    int len = strlen(buffer);
+    if (len > 40) len = 40; 
+    int col = (40 - len) / 2 + 1;
+    
+    // \x1b[15;1H  -> Move to row 15 (vertical center), column 1
+    // \x1b[2K     -> Clear entire line to erase previous strings
+    // \x1b[1m     -> Bold/Bright attribute (best effort for basic console)
+    // \x1b[15;%dH -> Move to exact column for horizontal centering
+    printf("\x1b[15;1H\x1b[2K\x1b[1m\x1b[15;%dH%s", col, buffer);
+    
+    // Force the console to draw the update immediately
+    fflush(stdout); 
+}
+
 static void fetch_core_data(ModData *mods, int count) {
     int unique_count = 0;
     ModData *unique = (ModData *)malloc(sizeof(ModData) * count);
@@ -447,7 +468,7 @@ static void fetch_core_data(ModData *mods, int count) {
         if (!found) unique[unique_count++] = mods[i];
     }
 
-    printf("Fetching core data for %d items (Batched)...\n", unique_count);
+    print_status("Fetching core data for %d items...", unique_count);
 
     const int BATCH_SIZE = 20;
 
@@ -477,7 +498,7 @@ static void fetch_core_data(ModData *mods, int count) {
             url[url_len-1] = '\0';
         }
         
-        printf("\x1b[2K\r[%d/%d] Fetching batch of %d mods...", 
+        print_status("[%d/%d] Fetching batch of %d mods...", 
                (i + current_batch > unique_count ? unique_count : i + current_batch), 
                unique_count, current_batch);
                
@@ -508,50 +529,62 @@ static void fetch_core_data(ModData *mods, int count) {
         json_object_put(root);
     }
     
-    printf("\n");
     free(unique);
 }
 
 int main(int argc, char **argv) {
     gfxInitDefault();
-    consoleInit(GFX_TOP, NULL);
-    printf("\x1b[1;1HGamebananaFetcher 3DS Port\n");
+    
+    PrintConsole topScreen, bottomScreen;
+    consoleInit(GFX_TOP, &topScreen);
+    consoleInit(GFX_BOTTOM, &bottomScreen);
+
+    // Lock the Top Screen to the background color and leave it blank
+    consoleSelect(&topScreen);
+    printf("\x1b[48;2;21;29;35m\x1b[2J");
+
+    // Initialize the Bottom Screen colors and make it the active display
+    consoleSelect(&bottomScreen);
+    printf("\x1b[38;2;171;160;34m"); // Text color
+    printf("\x1b[48;2;21;29;35m");   // Background color
+    printf("\x1b[2J");               // Clear screen to apply background
+
+    print_status("GamebananaFetcher 3DS Port");
+    
     if (log_to_file) {
-        // this doesn't need a str substitution but i'm leaving it here incase
-        printf("Logging to %s\n", LOG_FILE);
         freopen(LOG_FILE, "w", stdout);
     }
 
     socBuffer = (u32*)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
     if (!socBuffer) {
-        printf("Failed to allocate SOC buffer!\n");
+        print_status("Failed to allocate SOC buffer!");
         goto exit_no_soc;
     }
     if (R_FAILED(socInit(socBuffer, SOC_BUFFERSIZE))) {
-        printf("socInit failed!\n");
+        print_status("socInit failed!");
         goto exit_soc_fail;
     }
 
     if (R_FAILED(sslcInit(0))) {
-        printf("sslcInit failed!\n");
+        print_status("sslcInit failed!");
         goto exit_sslc_fail;
     }
 
     if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
-        printf("curl_global_init failed!\n");
+        print_status("curl_global_init failed!");
         goto exit_curl_fail;
     }
 
     rmrf(CACHE_DIR);
     init_paths();
     
-    printf("Fetching %d categories...\n", NUM_CATEGORIES);
+    print_status("Fetching %d categories...", NUM_CATEGORIES);
 
     ModData *all_mods = NULL;
     int total_count = 0;
 
     for (int i = 0; i < NUM_CATEGORIES; i++) {
-        printf("Fetching category %d/%d (ID %d)...\n", i + 1, NUM_CATEGORIES, CATEGORIES[i]);
+        print_status("Fetching category %d/%d...", i + 1, NUM_CATEGORIES);
         ModData *cat_mods = NULL;
         int cat_count = fetch_category(CATEGORIES[i], &cat_mods);
         if (cat_count > 0 && cat_mods) {
@@ -568,8 +601,8 @@ int main(int argc, char **argv) {
     }
 
     if (total_count > 0 && all_mods) {
-        total_count = deduplicate_mods(all_mods, total_count); // ???
-        printf("Total mods fetched: %d\n", total_count);
+        total_count = deduplicate_mods(all_mods, total_count); 
+        
         qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_id);
         
         fetch_core_data(all_mods, total_count);
@@ -577,13 +610,18 @@ int main(int argc, char **argv) {
         write_mods_json(MOD_LIST_FILE, all_mods, total_count, 0);
         write_mods_sorted(BY_NAME_FILE, all_mods, total_count, 1);
         write_mods_sorted(BY_UPDATED_FILE, all_mods, total_count, 0);
-        printf("Done! Files saved to %s\n", LISTS_DIR);
+        
+        print_status("Done! Files saved.");
         free(all_mods);
     } else {
-        printf("Failed to fetch any mods!\n");
+        print_status("Failed to fetch any mods!");
     }
 
-    printf("\nPress START to exit.\n");
+    // Adding a slight delay loop to ensure the user can read the final status
+    // before prompting them to exit.
+    svcSleepThread(1500000000ULL); // 1.5 seconds
+
+    print_status("Press START to exit.");
 
     while (aptMainLoop()) {
         gspWaitForVBlank();
@@ -605,6 +643,5 @@ exit_soc_fail:
 exit_no_soc:
     
     gfxExit();
-    fflush(stdout);
     return 0;
 }
