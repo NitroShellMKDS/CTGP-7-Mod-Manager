@@ -11,45 +11,33 @@
 #include <errno.h>
 #include <malloc.h>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <limits.h>
+#include <ctype.h>
 
 #define SOC_ALIGN       0x1000
-#define SOC_BUFFERSIZE  0x100000
+#define SOC_BUFFERSIZE  0x100000 // 1 MiB minimum allocation required by libnx/soc
 static u32 *socBuffer = NULL;
 
 static const char *USER_AGENT = "CTGP-7-Mod-Manager/3.0";
 static const char *API_V10_INDEX = "https://gamebanana.com/apiv10/Mod/Index";
 static const char *API_CORE_DATA = "https://api.gamebanana.com/Core/Item/Data";
 
-// CA bundle must be shipped in romfs (3DS has no system trust store).
-// Get one from https://curl.se/docs/caextract.html and add it to romfs.
 static const char *CA_BUNDLE_PATH = "romfs:/cacert.pem";
 
-// Hard cap on a single response body. This is a JSON API, not a file host -
-// a compromised/MITM'd endpoint should not be able to make us allocate
-// unbounded memory on a device with very little RAM.
-#define MAX_RESPONSE_SIZE (8 * 1024 * 1024)
+#define MAX_RESPONSE_SIZE (512 * 1024)
 
-// Network calls retry on transient failure (timeout, reset, DNS hiccup).
-// This matters even outside real network flakiness: on 3DS, libcurl's
-// timeout deadlines are computed from the guest system clock, which is
-// driven by the emulated CPU's tick counter in Citra/Azahar. Running with
-// the emulation speed limit removed advances that clock faster than real
-// wall-clock time, so a "15 second" timeout can elapse in a couple of real
-// seconds - long before a normal HTTPS round trip finishes. Without a
-// retry, that manifests as categories silently failing to fetch under
-// fast-forward. Retrying (each attempt gets a fresh deadline) absorbs this
-// instead of dropping data.
 #define MAX_FETCH_ATTEMPTS 4
-#define RETRY_BASE_DELAY_NS 500000000ULL // 500ms, doubled each attempt
+#define RETRY_BASE_DELAY_NS 500000000ULL 
 
 static const int CATEGORIES[] = {35931, 10605, 35932, 35943, 35933, 35935, 35937, 35938, 35939, 35941, 35942, 35944, 35946, 35947, 35945, 35940, 35934, 35936};
 static const int NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 
-static const bool log_to_file = false;
+#define CONSOLE_COLS 40
+#define CONSOLE_ROWS 30
 
 #define MAX_PATH 512
 #define MAX_URL 2048
-#define MAX_FTW_DESCRIPTORS 128
 
 #define BASE_DIR "sdmc:/"
 #define APP_DIR BASE_DIR "3ds/CTGP-7-Mod-Manager/"
@@ -59,7 +47,6 @@ static const bool log_to_file = false;
 #define CTGP7_DIR BASE_DIR "CTGP-7/MyStuff/Characters/"
 
 #define STATE_FILE APP_DIR "installed_mods.json"
-#define LOG_FILE APP_DIR "log.txt"
 #define MOD_LIST_FILE LISTS_DIR "modlist.json"
 #define BY_NAME_FILE LISTS_DIR "byname.json"
 #define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
@@ -70,7 +57,7 @@ typedef struct {
     char Author[128];
     char ThumbnailUrl[512];
     char LatestFileUrl[512];
-    long long LatestFileDate;
+    int64_t LatestFileDate;
     char LatestFileName[256];
 } ModData;
 
@@ -82,32 +69,28 @@ typedef struct {
     bool success;
 } FetchResult;
 
-// recursive delete because newlib does not have POSIX extensions
-// Kagi Assistant, audited for errors, silenced for clean UI
 static int rmrf(const char *path) {
     DIR *d = opendir(path);
-    if (!d) {
-        // Silently fail if the directory doesn't exist
-        return -1;
-    }
+    if (!d) return -1;
 
     struct dirent *entry;
     while ((entry = readdir(d)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
-        char fullpath[1024];
+        char fullpath[PATH_MAX + 256];
         const char *sep = "/";
         size_t len = strlen(path);
         if (len > 0 && path[len - 1] == '/') {
             sep = "";
         }
 
-        snprintf(fullpath, sizeof(fullpath), "%s%s%s", path, sep, entry->d_name);
+        int w_len = snprintf(fullpath, sizeof(fullpath), "%s%s%s", path, sep, entry->d_name);
+        if (w_len < 0 || (size_t)w_len >= sizeof(fullpath)) continue;
 
         struct stat st;
         if (stat(fullpath, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
+            if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
                 if (rmrf(fullpath) != 0) {
                     closedir(d);
                     return -1;
@@ -118,24 +101,20 @@ static int rmrf(const char *path) {
                     return -1;
                 }
             }
-        } else {
+        } else if (errno != ENOENT) {
             closedir(d);
             return -1;
         }
     }
 
     closedir(d);
-
-    if (rmdir(path) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return rmdir(path) == 0 ? 0 : -1;
 }
 
 static void mkdir_p(const char *path) {
     char buf[MAX_PATH];
-    snprintf(buf, sizeof(buf), "%s", path);
+    int len = snprintf(buf, sizeof(buf), "%s", path);
+    if (len < 0 || (size_t)len >= sizeof(buf)) return;
 
     size_t prefix_len = strlen("sdmc:/");
     char *start = buf;
@@ -146,11 +125,15 @@ static void mkdir_p(const char *path) {
     for (char *p = start; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            mkdir(buf, 0777); 
+            if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
+                return;
+            }
             *p = '/';
         }
     }
-    mkdir(buf, 0777);
+    if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
+        return;
+    }
 }
 
 static void init_paths(void) {
@@ -161,13 +144,11 @@ static void init_paths(void) {
 }
 
 static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
-    size_t total = size * nmemb;
+    uint64_t total = (uint64_t)size * nmemb;
     FetchResult *result = (FetchResult *)userp;
 
-    // Refuse to keep growing forever - a compromised or malicious endpoint
-    // could otherwise exhaust memory on a device with very little RAM.
     if (result->size + total + 1 > MAX_RESPONSE_SIZE) {
-        return 0; // signals an error to curl, aborts the transfer
+        return 0; 
     }
 
     if (result->size + total + 1 > result->capacity) {
@@ -179,18 +160,15 @@ static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *use
         result->data = new_data;
         result->capacity = new_cap;
     }
-    memcpy(result->data + result->size, contents, total);
-    result->size += total;
+    memcpy(result->data + result->size, contents, (size_t)total);
+    result->size += (size_t)total;
     result->data[result->size] = '\0';
-    return total;
+    return (size_t)total;
 }
 
-static void free_fetch_result(FetchResult *result); // fwd decl, defined below
+static void free_fetch_result(FetchResult *result); 
+static void print_status(const char* format, ...);
 
-// curl handle is owned by the caller (main) and reused across every request
-// so that TCP/TLS connections to the same host get kept alive instead of
-// renegotiating a fresh handshake per call - this is most of why loading
-// felt slow with dozens of sequential requests.
 static FetchResult curl_get(CURL *curl, const char *url) {
     FetchResult result;
     memset(&result, 0, sizeof(result));
@@ -211,33 +189,29 @@ static FetchResult curl_get(CURL *curl, const char *url) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    // Verify TLS certificates. Disabling this (as the previous version did)
-    // means any attacker on-path (rogue AP, DNS spoof, compromised router)
-    // can transparently MITM every request this app makes and rewrite the
-    // JSON mod listing / file URLs it receives - a networked app talking to
-    // a modding site is exactly the case where this matters.
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_CAINFO, CA_BUNDLE_PATH);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
     CURLcode res = curl_easy_perform(curl);
     if (res == CURLE_OK) {
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.response_code);
-        if (result.response_code >= 200 && result.response_code < 300) {
-            result.success = true;
+        if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.response_code) == CURLE_OK) {
+            if (result.response_code >= 200 && result.response_code < 300) {
+                result.success = true;
+            }
         }
+    } else {
+        print_status("cURL Error: %s", curl_easy_strerror(res));
     }
 
     return result;
 }
 
-// Wraps curl_get with retries + backoff. Each attempt gets its own fresh
-// timeout deadline, so a single premature timeout (see note above about
-// emulation speed scaling the guest clock) doesn't drop the category/batch
-// entirely - it just costs an extra round trip.
 static FetchResult curl_get_retry(CURL *curl, const char *url, int max_attempts) {
     FetchResult result;
     memset(&result, 0, sizeof(result));
@@ -263,42 +237,51 @@ static const char *get_json_string(json_object *obj, const char *key) {
     if (json_object_object_get_ex(obj, key, &val) && json_object_get_type(val) == json_type_string) {
         return json_object_get_string(val);
     }
-    return "";
+    return NULL;
 }
 
 static int get_json_int(json_object *obj, const char *key) {
     json_object *val;
-    if (json_object_object_get_ex(obj, key, &val) && json_object_get_type(val) == json_type_int) {
-        return json_object_get_int(val);
+    if (json_object_object_get_ex(obj, key, &val)) {
+        if (json_object_get_type(val) == json_type_int) {
+            return json_object_get_int(val);
+        } else if (json_object_get_type(val) == json_type_string) {
+            return atoi(json_object_get_string(val));
+        }
     }
     return 0;
 }
 
-static long long get_json_llong(json_object *obj, const char *key) {
+static int64_t get_json_int64(json_object *obj, const char *key) {
     json_object *val;
-    if (json_object_object_get_ex(obj, key, &val) && json_object_get_type(val) == json_type_int) {
-        return (long long)json_object_get_int64(val);
+    if (json_object_object_get_ex(obj, key, &val)) {
+        if (json_object_get_type(val) == json_type_int) {
+            return json_object_get_int64(val);
+        } else if (json_object_get_type(val) == json_type_string) {
+            return strtoll(json_object_get_string(val), NULL, 10);
+        }
     }
     return 0;
 }
 
 static void escape_json_string(const char *src, char *dst, int dst_size) {
+    if (!src) { dst[0] = '\0'; return; }
     int di = 0;
     for (int i = 0; src[i] && di < dst_size - 2; i++) {
         char c = src[i];
-        if (c == '"') { if (di + 2 < dst_size) { dst[di++] = '\\'; dst[di++] = '"'; } }
-        else if (c == '\\') { if (di + 2 < dst_size) { dst[di++] = '\\'; dst[di++] = '\\'; } }
-        else if (c == '\n') { if (di + 2 < dst_size) { dst[di++] = '\\'; dst[di++] = 'n'; } }
-        else if (c == '\r') { if (di + 2 < dst_size) { dst[di++] = '\\'; dst[di++] = 'r'; } }
-        else if (c == '\t') { if (di + 2 < dst_size) { dst[di++] = '\\'; dst[di++] = 't'; } }
+        if (c == '"') { dst[di++] = '\\'; dst[di++] = '"'; }
+        else if (c == '\\') { dst[di++] = '\\'; dst[di++] = '\\'; }
+        else if (c == '\n') { dst[di++] = '\\'; dst[di++] = 'n'; }
+        else if (c == '\r') { dst[di++] = '\\'; dst[di++] = 'r'; }
+        else if (c == '\t') { dst[di++] = '\\'; dst[di++] = 't'; }
         else dst[di++] = c;
     }
     dst[di] = '\0';
 }
 
-static void write_mods_json(const char *filename, ModData *mods, int count, int sort_by_name) {
+static bool write_mods_json(const char *filename, ModData *mods, int count) {
     FILE *f = fopen(filename, "wb");
-    if (!f) return;
+    if (!f) return false;
 
     fprintf(f, "[\n");
     for (int i = 0; i < count; i++) {
@@ -314,13 +297,20 @@ static void write_mods_json(const char *filename, ModData *mods, int count, int 
         fprintf(f, "\"Author\":\"%s\",", author_esc);
         fprintf(f, "\"ThumbnailUrl\":\"%s\",", thumb_esc);
         fprintf(f, "\"LatestFileUrl\":\"%s\",", url_esc);
-        fprintf(f, "\"LatestFileDate\":%lld,", mods[i].LatestFileDate);
+        fprintf(f, "\"LatestFileDate\":%" PRId64 ",", mods[i].LatestFileDate);
         fprintf(f, "\"LatestFileName\":\"%s\"}", fname_esc);
         if (i < count - 1) fprintf(f, ",");
         fprintf(f, "\n");
     }
     fprintf(f, "]\n");
+    fflush(f);
+    
+    if (ferror(f)) {
+        fclose(f);
+        return false;
+    }
     fclose(f);
+    return true;
 }
 
 static int compare_mods_by_name(const void *a, const void *b) {
@@ -332,32 +322,53 @@ static int compare_mods_by_name(const void *a, const void *b) {
 static int compare_mods_by_updated(const void *a, const void *b) {
     const ModData *ma = (const ModData *)a;
     const ModData *mb = (const ModData *)b;
-    if (mb->LatestFileDate > ma->LatestFileDate) return 1;
-    if (mb->LatestFileDate < ma->LatestFileDate) return -1;
+    if (ma->LatestFileDate < mb->LatestFileDate) return 1;
+    if (ma->LatestFileDate > mb->LatestFileDate) return -1;
     return 0;
 }
 
-static void write_mods_sorted(const char *filename, ModData *mods, int count, int by_name) {
-    ModData *sorted = (ModData *)malloc(sizeof(ModData) * count);
-    if (!sorted) return;
-    memcpy(sorted, mods, sizeof(ModData) * count);
-    if (by_name) qsort(sorted, count, sizeof(ModData), compare_mods_by_name);
-    else qsort(sorted, count, sizeof(ModData), compare_mods_by_updated);
-    write_mods_json(filename, sorted, count, 0);
-    free(sorted);
+static int compare_mods_by_id(const void *a, const void *b) {
+    int id_a = ((const ModData *)a)->Id;
+    int id_b = ((const ModData *)b)->Id;
+    if (id_a > id_b) return 1;
+    if (id_a < id_b) return -1;
+    return 0;
 }
 
-static void print_status(const char* format, ...); // fwd decl, defined below
+static void print_status(const char* format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    if (len < 0) return;
+    if ((size_t)len >= sizeof(buffer)) {
+        buffer[sizeof(buffer)-4] = '.';
+        buffer[sizeof(buffer)-3] = '.';
+        buffer[sizeof(buffer)-2] = '.';
+        buffer[sizeof(buffer)-1] = '\0';
+        len = sizeof(buffer) - 1;
+    }
+
+    if (len > CONSOLE_COLS) len = CONSOLE_COLS; 
+    int col = (CONSOLE_COLS - len) / 2 + 1;
+    
+    // Removed \x1b[0m and restored a 24-bit text color code (\x1b[38;2;R;G;Bm) if you had a specific text color
+    printf("\x1b[15;1H\x1b[2K\x1b[1m\x1b[15;%dH%s", col, buffer);
+    fflush(stdout); 
+}
 
 static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
     char url[MAX_URL];
-    snprintf(url, sizeof(url), "%s?_nPage=1&_nPerpage=50&_aFilters[Generic_Category]=%d", API_V10_INDEX, cat_id);
+    int w_len = snprintf(url, sizeof(url), "%s?_nPage=1&_nPerpage=50&_aFilters[Generic_Category]=%d", API_V10_INDEX, cat_id);
+    if (w_len < 0 || (size_t)w_len >= sizeof(url)) return 0;
 
     FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
     if (!result.success) {
         free_fetch_result(&result);
         print_status("Category %d failed after retries, skipping", cat_id);
-        svcSleepThread(700000000ULL); // let the message be readable
+        svcSleepThread(700000000ULL); 
         return 0;
     }
 
@@ -373,6 +384,12 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
     }
 
     int len = json_object_array_length(records);
+    if (len <= 0) {
+        json_object_put(root);
+        *out_mods = NULL;
+        return 0;
+    }
+
     *out_mods = (ModData *)malloc(sizeof(ModData) * len);
     if (!*out_mods) { json_object_put(root); return 0; }
 
@@ -381,23 +398,21 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
         if (!record || json_object_get_type(record) != json_type_object) continue;
 
         int id = get_json_int(record, "_idRow");
-        if (id == 0) {
-            json_object *id_obj;
-            if (json_object_object_get_ex(record, "_idRow", &id_obj) && json_object_get_type(id_obj) == json_type_int) {
-                id = json_object_get_int(id_obj);
-            }
-        }
         if (id == 0) continue;
 
         ModData mod;
         memset(&mod, 0, sizeof(mod));
         mod.Id = id;
-        strncpy(mod.Name, get_json_string(record, "_sName"), sizeof(mod.Name) - 1);
-        strncpy(mod.Author, "Unknown", sizeof(mod.Author) - 1);
+        
+        const char *sName = get_json_string(record, "_sName");
+        if (sName) snprintf(mod.Name, sizeof(mod.Name), "%s", sName);
+        
+        snprintf(mod.Author, sizeof(mod.Author), "Unknown");
 
         json_object *submitter;
         if (json_object_object_get_ex(record, "_aSubmitter", &submitter) && json_object_get_type(submitter) == json_type_object) {
-            strncpy(mod.Author, get_json_string(submitter, "_sName"), sizeof(mod.Author) - 1);
+            const char *subName = get_json_string(submitter, "_sName");
+            if (subName) snprintf(mod.Author, sizeof(mod.Author), "%s", subName);
         }
 
         json_object *preview;
@@ -408,12 +423,14 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
                 for (int j = 0; j < img_count && j < 1; j++) {
                     json_object *img = json_object_array_get_idx(images, j);
                     if (!img || json_object_get_type(img) != json_type_object) continue;
+                    
                     const char *base_url = get_json_string(img, "_sBaseUrl");
                     const char *file220 = get_json_string(img, "_sFile220");
                     const char *file = get_json_string(img, "_sFile");
-                    if (base_url[0] && file220[0]) {
+                    
+                    if (base_url && file220 && base_url[0] && file220[0]) {
                         snprintf(mod.ThumbnailUrl, sizeof(mod.ThumbnailUrl), "%s/%s", base_url, file220);
-                    } else if (base_url[0] && file[0]) {
+                    } else if (base_url && file && base_url[0] && file[0]) {
                         snprintf(mod.ThumbnailUrl, sizeof(mod.ThumbnailUrl), "%s/%s", base_url, file);
                     }
                 }
@@ -426,52 +443,36 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
     return count;
 }
 
-static int compare_mods_by_id(const void *a, const void *b) {
-    return ((const ModData *)a)->Id - ((const ModData *)b)->Id;
-}
-
 static int deduplicate_mods(ModData *mods, int count) {
     if (count <= 1) return count;
-
+    
+    qsort(mods, count, sizeof(ModData), compare_mods_by_id);
+    
     int unique_count = 0;
-    for (int i = count - 1; i >= 0; i--) {
-        int found = 0;
-        for (int j = i + 1; j < count; j++) {
-            if (mods[j].Id == mods[i].Id) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) unique_count++;
-    }
-
-    ModData *unique = (ModData *)malloc(sizeof(ModData) * unique_count);
-    if (!unique) return count;
-
-    int ui = unique_count - 1;
-    for (int i = count - 1; i >= 0; i--) {
-        int found = 0;
-        for (int j = i + 1; j < count; j++) {
-            if (mods[j].Id == mods[i].Id) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            unique[ui--] = mods[i];
+    for (int i = 0; i < count; i++) {
+        if (i == 0 || mods[i].Id != mods[i-1].Id) {
+            mods[unique_count++] = mods[i];
         }
     }
-
-    memcpy(mods, unique, sizeof(ModData) * unique_count);
-    free(unique);
     return unique_count;
+}
+
+static ModData* search_mods_by_id(ModData *mods, int count, int id) {
+    int low = 0;
+    int high = count - 1;
+    while (low <= high) {
+        int mid = low + (high - low) / 2;
+        if (mods[mid].Id == id) return &mods[mid];
+        if (mods[mid].Id < id) low = mid + 1;
+        else high = mid - 1;
+    }
+    return NULL;
 }
 
 static void parse_latest_file(json_object *item, ModData *mod) {
     if (json_object_get_type(item) == json_type_array) {
         int arr_len = json_object_array_length(item);
         if (arr_len > 0) {
-            // nitro, please comment what this change fixes and how
             item = json_object_array_get_idx(item, 0);
         } else {
             return;
@@ -480,81 +481,68 @@ static void parse_latest_file(json_object *item, ModData *mod) {
 
     if (json_object_get_type(item) != json_type_object) return;
 
-    long long max_ts = 0;
+    int64_t max_ts = 0;
 
-    json_object_object_foreach(item, key, file_obj) {
-        (void)key;
-        if (file_obj && json_object_get_type(file_obj) == json_type_object) {
-            const char *sfile = get_json_string(file_obj, "_sFile");
-            long long ts = get_json_llong(file_obj, "_tsDateAdded");
-            int fid = get_json_int(file_obj, "_idRow");
-            if (sfile[0] && ts > max_ts) {
-                max_ts = ts;
-                snprintf(mod->LatestFileUrl, sizeof(mod->LatestFileUrl), "https://gamebanana.com/dl/%d", fid);
-                strncpy(mod->LatestFileName, sfile, sizeof(mod->LatestFileName) - 1);
-                mod->LatestFileDate = max_ts;
+    json_object *files_obj;
+    if (json_object_object_get_ex(item, "aFiles", &files_obj) && json_object_get_type(files_obj) == json_type_array) {
+        int files_len = json_object_array_length(files_obj);
+        for (int i = 0; i < files_len; i++) {
+            json_object *file_obj = json_object_array_get_idx(files_obj, i);
+            if (file_obj && json_object_get_type(file_obj) == json_type_object) {
+                const char *sfile = get_json_string(file_obj, "_sFile");
+                int64_t ts = get_json_int64(file_obj, "_tsDateAdded");
+                int fid = get_json_int(file_obj, "_idRow");
+                if (sfile && sfile[0] && ts > max_ts) {
+                    max_ts = ts;
+                    snprintf(mod->LatestFileUrl, sizeof(mod->LatestFileUrl), "https://gamebanana.com/dl/%d", fid);
+                    snprintf(mod->LatestFileName, sizeof(mod->LatestFileName), "%s", sfile);
+                    mod->LatestFileDate = max_ts;
+                }
+            }
+        }
+    } else {
+        json_object_object_foreach(item, key, file_obj) {
+            (void)key;
+            if (file_obj && json_object_get_type(file_obj) == json_type_object) {
+                const char *sfile = get_json_string(file_obj, "_sFile");
+                int64_t ts = get_json_int64(file_obj, "_tsDateAdded");
+                int fid = get_json_int(file_obj, "_idRow");
+                if (sfile && sfile[0] && ts > max_ts) {
+                    max_ts = ts;
+                    snprintf(mod->LatestFileUrl, sizeof(mod->LatestFileUrl), "https://gamebanana.com/dl/%d", fid);
+                    snprintf(mod->LatestFileName, sizeof(mod->LatestFileName), "%s", sfile);
+                    mod->LatestFileDate = max_ts;
+                }
             }
         }
     }
 }
 
-// Calculates center alignment and updates a single line in-place
-static void print_status(const char* format, ...) {
-    char buffer[256];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    // Standard 3DS bottom screen is 40 characters wide (320px / 8px font).
-    int len = strlen(buffer);
-    if (len > 40) len = 40; 
-    int col = (40 - len) / 2 + 1;
-    
-    // \x1b[15;1H  -> Move to row 15 (vertical center), column 1
-    // \x1b[2K     -> Clear entire line to erase previous strings
-    // \x1b[1m     -> Bold/Bright attribute (best effort for basic console)
-    // \x1b[15;%dH -> Move to exact column for horizontal centering
-    printf("\x1b[15;1H\x1b[2K\x1b[1m\x1b[15;%dH%s", col, buffer);
-    
-    // Force the console to draw the update immediately
-    fflush(stdout); 
-}
-
 static void fetch_core_data(CURL *curl, ModData *mods, int count) {
-    int unique_count = 0;
-    ModData *unique = (ModData *)malloc(sizeof(ModData) * count);
-    memset(unique, 0, sizeof(ModData) * count);
-
-    for (int i = 0; i < count; i++) {
-        int found = 0;
-        for (int j = 0; j < unique_count; j++) {
-            if (unique[j].Id == mods[i].Id) { found = 1; break; }
-        }
-        if (!found) unique[unique_count++] = mods[i];
-    }
-
-    print_status("Fetching core data for %d items...", unique_count);
+    print_status("Fetching core data for %d items...", count);
 
     const int BATCH_SIZE = 20;
 
-    for (int i = 0; i < unique_count; i += BATCH_SIZE) {
+    for (int i = 0; i < count; i += BATCH_SIZE) {
         char url[MAX_URL];
         int url_len = snprintf(url, sizeof(url), "%s?", API_CORE_DATA);
+        if (url_len < 0 || (size_t)url_len >= sizeof(url)) continue;
         
         int current_batch = 0;
         ModData* batch_ptrs[BATCH_SIZE];
         
-        for (int j = 0; j < BATCH_SIZE && (i + j) < unique_count; j++) {
-            if (unique[i+j].LatestFileUrl[0]) continue;
+        for (int j = 0; j < BATCH_SIZE && (i + j) < count; j++) {
+            if (mods[i+j].LatestFileUrl[0]) continue;
             
             int added = snprintf(url + url_len, sizeof(url) - url_len, 
-                "itemtype[]=Mod&itemid[]=%d&fields[]=Files().aFiles()&", unique[i+j].Id);
+                "itemtype[]=Mod&itemid[]=%d&fields[]=Files().aFiles()&", mods[i+j].Id);
             
-            if (url_len + added >= sizeof(url)) break;
+            if (added < 0 || (size_t)added >= sizeof(url) - url_len) {
+                break;
+            }
             url_len += added;
             
-            batch_ptrs[current_batch] = &unique[i+j];
+            batch_ptrs[current_batch] = &mods[i+j];
             current_batch++;
         }
         
@@ -565,22 +553,22 @@ static void fetch_core_data(CURL *curl, ModData *mods, int count) {
         }
         
         print_status("[%d/%d] Fetching batch of %d mods...", 
-               (i + current_batch > unique_count ? unique_count : i + current_batch), 
-               unique_count, current_batch);
+               (i + current_batch > count ? count : i + current_batch), 
+               count, current_batch);
                
         FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
         if (!result.success) {
             free_fetch_result(&result);
-            print_status("Batch fetch failed after retries, skipping %d mods", current_batch);
+            print_status("Batch fetch failed after retries.");
             svcSleepThread(700000000ULL);
-            continue; 
+            return;
         }
         
         json_object *root = json_tokener_parse(result.data);
         free_fetch_result(&result);
         if (!root || json_object_get_type(root) != json_type_array) {
             if (root) json_object_put(root);
-            continue;
+            return;
         }
         
         int arr_len = json_object_array_length(root);
@@ -588,47 +576,38 @@ static void fetch_core_data(CURL *curl, ModData *mods, int count) {
             json_object *item = json_object_array_get_idx(root, k);
             if (!item) continue;
             
-            for (int m = 0; m < count; m++) {
-                if (mods[m].Id == batch_ptrs[k]->Id) {
-                    parse_latest_file(item, &mods[m]);
-                }
+            ModData *mod = search_mods_by_id(mods, count, batch_ptrs[k]->Id);
+            if (mod) {
+                parse_latest_file(item, mod);
             }
         }
         json_object_put(root);
     }
-    
-    free(unique);
 }
 
 int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    
+    CURL *curl = NULL; // Initialize to NULL at the top
+
     gfxInitDefault();
 
-    // Mounts the romfs image baked into the .3dsx (see Makefile ROMFS var)
-    // as the "romfs:" device. Without this, romfs:/cacert.pem simply isn't
-    // reachable yet and CURLOPT_CAINFO will fail to open it on every single
-    // request - which looks exactly like "every category fails, retries
-    // don't help" since the retries hit the same missing mount.
     bool romfs_mounted = R_SUCCEEDED(romfsInit());
     
     PrintConsole topScreen, bottomScreen;
     consoleInit(GFX_TOP, &topScreen);
     consoleInit(GFX_BOTTOM, &bottomScreen);
 
-    // Lock the Top Screen to the background color and leave it blank
     consoleSelect(&topScreen);
     printf("\x1b[48;2;21;29;35m\x1b[2J");
 
-    // Initialize the Bottom Screen colors and make it the active display
     consoleSelect(&bottomScreen);
     printf("\x1b[38;2;171;160;34m"); // Text color
     printf("\x1b[48;2;21;29;35m");   // Background color
     printf("\x1b[2J");               // Clear screen to apply background
 
     print_status("GamebananaFetcher 3DS Port");
-    
-    if (log_to_file) {
-        freopen(LOG_FILE, "w", stdout);
-    }
 
     if (!romfs_mounted) {
         print_status("romfsInit failed - no CA bundle, cannot verify TLS!");
@@ -656,11 +635,8 @@ int main(int argc, char **argv) {
         goto exit_curl_fail;
     }
 
-    // One handle reused for every request in this run: same-host connections
-    // (TCP + TLS session) get kept alive across calls instead of every one
-    // of the ~18 category requests and every core-data batch paying for its
-    // own handshake, which was the biggest single cost in the total load time.
-    CURL *curl = curl_easy_init();
+    // Remove the "CURL *" since it's already declared
+    curl = curl_easy_init(); 
     if (!curl) {
         print_status("curl_easy_init failed!");
         goto exit_curl_handle_fail;
@@ -688,19 +664,23 @@ int main(int argc, char **argv) {
             memcpy(all_mods + total_count, cat_mods, sizeof(ModData) * cat_count);
             total_count += cat_count;
         }
-        free(cat_mods); // fetch_category can allocate even when cat_count is 0
+        if (cat_mods) free(cat_mods);
     }
 
     if (total_count > 0 && all_mods) {
         total_count = deduplicate_mods(all_mods, total_count); 
         
-        qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_id);
-        
         fetch_core_data(curl, all_mods, total_count);
         
-        write_mods_json(MOD_LIST_FILE, all_mods, total_count, 0);
-        write_mods_sorted(BY_NAME_FILE, all_mods, total_count, 1);
-        write_mods_sorted(BY_UPDATED_FILE, all_mods, total_count, 0);
+        if (!write_mods_json(MOD_LIST_FILE, all_mods, total_count)) {
+            print_status("Error saving mod list!");
+        }
+
+        qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_name);
+        write_mods_json(BY_NAME_FILE, all_mods, total_count);
+
+        qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_updated);
+        write_mods_json(BY_UPDATED_FILE, all_mods, total_count);
         
         print_status("Done! Files saved.");
         free(all_mods);
@@ -708,9 +688,7 @@ int main(int argc, char **argv) {
         print_status("Failed to fetch any mods!");
     }
 
-    // Adding a slight delay loop to ensure the user can read the final status
-    // before prompting them to exit.
-    svcSleepThread(1500000000ULL); // 1.5 seconds
+    svcSleepThread(1500000000ULL);
 
     print_status("Press START to exit.");
 
@@ -718,7 +696,6 @@ int main(int argc, char **argv) {
         gspWaitForVBlank();
         hidScanInput();
         if (hidKeysDown() & KEY_START) {
-            rmrf(CACHE_DIR);
             break;
         }
     }
@@ -738,5 +715,5 @@ exit_no_soc:
     if (romfs_mounted) romfsExit();
 
     gfxExit();
-    return 0;
+    return (romfs_mounted && socBuffer && curl) ? 0 : 1;
 }
