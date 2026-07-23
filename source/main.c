@@ -542,8 +542,8 @@ int main(int argc, char **argv) {
         goto exit_curl_fail;
     }
 
-    init_paths();
     rmrf(CACHE_DIR);
+    init_paths();
     
     printf("Fetching %d categories...\n", NUM_CATEGORIES);
 
@@ -588,7 +588,10 @@ int main(int argc, char **argv) {
     while (aptMainLoop()) {
         gspWaitForVBlank();
         hidScanInput();
-        if (hidKeysDown() & KEY_START) break;
+        if (hidKeysDown() & KEY_START) {
+            rmrf(CACHE_DIR);
+            break;
+        }
     }
 
     curl_global_cleanup();
@@ -603,6 +606,5 @@ exit_no_soc:
     
     gfxExit();
     fflush(stdout);
-    rmrf(CACHE_DIR);
     return 0;
 }
