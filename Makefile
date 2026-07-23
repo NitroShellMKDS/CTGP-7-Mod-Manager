@@ -16,6 +16,7 @@ DATA		:=	data
 INCLUDES	:=	include
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
+ROMFS		:=	romfs
 
 #---------------------------------------------------------------------------------
 # options for code generation

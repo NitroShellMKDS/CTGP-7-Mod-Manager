@@ -20,6 +20,28 @@ static const char *USER_AGENT = "CTGP-7-Mod-Manager/3.0";
 static const char *API_V10_INDEX = "https://gamebanana.com/apiv10/Mod/Index";
 static const char *API_CORE_DATA = "https://api.gamebanana.com/Core/Item/Data";
 
+// CA bundle must be shipped in romfs (3DS has no system trust store).
+// Get one from https://curl.se/docs/caextract.html and add it to romfs.
+static const char *CA_BUNDLE_PATH = "romfs:/cacert.pem";
+
+// Hard cap on a single response body. This is a JSON API, not a file host -
+// a compromised/MITM'd endpoint should not be able to make us allocate
+// unbounded memory on a device with very little RAM.
+#define MAX_RESPONSE_SIZE (8 * 1024 * 1024)
+
+// Network calls retry on transient failure (timeout, reset, DNS hiccup).
+// This matters even outside real network flakiness: on 3DS, libcurl's
+// timeout deadlines are computed from the guest system clock, which is
+// driven by the emulated CPU's tick counter in Citra/Azahar. Running with
+// the emulation speed limit removed advances that clock faster than real
+// wall-clock time, so a "15 second" timeout can elapse in a couple of real
+// seconds - long before a normal HTTPS round trip finishes. Without a
+// retry, that manifests as categories silently failing to fetch under
+// fast-forward. Retrying (each attempt gets a fresh deadline) absorbs this
+// instead of dropping data.
+#define MAX_FETCH_ATTEMPTS 4
+#define RETRY_BASE_DELAY_NS 500000000ULL // 500ms, doubled each attempt
+
 static const int CATEGORIES[] = {35931, 10605, 35932, 35943, 35933, 35935, 35937, 35938, 35939, 35941, 35942, 35944, 35946, 35947, 35945, 35940, 35934, 35936};
 static const int NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 
@@ -141,9 +163,17 @@ static void init_paths(void) {
 static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t total = size * nmemb;
     FetchResult *result = (FetchResult *)userp;
+
+    // Refuse to keep growing forever - a compromised or malicious endpoint
+    // could otherwise exhaust memory on a device with very little RAM.
+    if (result->size + total + 1 > MAX_RESPONSE_SIZE) {
+        return 0; // signals an error to curl, aborts the transfer
+    }
+
     if (result->size + total + 1 > result->capacity) {
         size_t new_cap = result->capacity * 2;
         if (new_cap < result->size + total + 1) new_cap = result->size + total + 1;
+        if (new_cap > MAX_RESPONSE_SIZE) new_cap = MAX_RESPONSE_SIZE;
         char *new_data = (char *)realloc(result->data, new_cap);
         if (!new_data) return 0;
         result->data = new_data;
@@ -155,29 +185,43 @@ static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *use
     return total;
 }
 
-static FetchResult curl_get(const char *url) {
+static void free_fetch_result(FetchResult *result); // fwd decl, defined below
+
+// curl handle is owned by the caller (main) and reused across every request
+// so that TCP/TLS connections to the same host get kept alive instead of
+// renegotiating a fresh handshake per call - this is most of why loading
+// felt slow with dozens of sequential requests.
+static FetchResult curl_get(CURL *curl, const char *url) {
     FetchResult result;
     memset(&result, 0, sizeof(result));
     result.capacity = 4096;
     result.data = (char *)malloc(result.capacity);
     if (!result.data) return result;
 
-    CURL *curl = curl_easy_init();
     if (!curl) {
         free(result.data);
         memset(&result, 0, sizeof(result));
         return result;
     }
 
+    curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    // Verify TLS certificates. Disabling this (as the previous version did)
+    // means any attacker on-path (rogue AP, DNS spoof, compromised router)
+    // can transparently MITM every request this app makes and rewrite the
+    // JSON mod listing / file URLs it receives - a networked app talking to
+    // a modding site is exactly the case where this matters.
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, CA_BUNDLE_PATH);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
     CURLcode res = curl_easy_perform(curl);
     if (res == CURLE_OK) {
@@ -187,7 +231,25 @@ static FetchResult curl_get(const char *url) {
         }
     }
 
-    curl_easy_cleanup(curl);
+    return result;
+}
+
+// Wraps curl_get with retries + backoff. Each attempt gets its own fresh
+// timeout deadline, so a single premature timeout (see note above about
+// emulation speed scaling the guest clock) doesn't drop the category/batch
+// entirely - it just costs an extra round trip.
+static FetchResult curl_get_retry(CURL *curl, const char *url, int max_attempts) {
+    FetchResult result;
+    memset(&result, 0, sizeof(result));
+
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        if (attempt > 0) {
+            free_fetch_result(&result);
+            svcSleepThread(RETRY_BASE_DELAY_NS << (attempt - 1));
+        }
+        result = curl_get(curl, url);
+        if (result.success) return result;
+    }
     return result;
 }
 
@@ -285,13 +347,17 @@ static void write_mods_sorted(const char *filename, ModData *mods, int count, in
     free(sorted);
 }
 
-static int fetch_category(int cat_id, ModData **out_mods) {
+static void print_status(const char* format, ...); // fwd decl, defined below
+
+static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
     char url[MAX_URL];
     snprintf(url, sizeof(url), "%s?_nPage=1&_nPerpage=50&_aFilters[Generic_Category]=%d", API_V10_INDEX, cat_id);
 
-    FetchResult result = curl_get(url);
+    FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
     if (!result.success) {
         free_fetch_result(&result);
+        print_status("Category %d failed after retries, skipping", cat_id);
+        svcSleepThread(700000000ULL); // let the message be readable
         return 0;
     }
 
@@ -455,7 +521,7 @@ static void print_status(const char* format, ...) {
     fflush(stdout); 
 }
 
-static void fetch_core_data(ModData *mods, int count) {
+static void fetch_core_data(CURL *curl, ModData *mods, int count) {
     int unique_count = 0;
     ModData *unique = (ModData *)malloc(sizeof(ModData) * count);
     memset(unique, 0, sizeof(ModData) * count);
@@ -502,9 +568,11 @@ static void fetch_core_data(ModData *mods, int count) {
                (i + current_batch > unique_count ? unique_count : i + current_batch), 
                unique_count, current_batch);
                
-        FetchResult result = curl_get(url);
+        FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
         if (!result.success) {
             free_fetch_result(&result);
+            print_status("Batch fetch failed after retries, skipping %d mods", current_batch);
+            svcSleepThread(700000000ULL);
             continue; 
         }
         
@@ -534,6 +602,13 @@ static void fetch_core_data(ModData *mods, int count) {
 
 int main(int argc, char **argv) {
     gfxInitDefault();
+
+    // Mounts the romfs image baked into the .3dsx (see Makefile ROMFS var)
+    // as the "romfs:" device. Without this, romfs:/cacert.pem simply isn't
+    // reachable yet and CURLOPT_CAINFO will fail to open it on every single
+    // request - which looks exactly like "every category fails, retries
+    // don't help" since the retries hit the same missing mount.
+    bool romfs_mounted = R_SUCCEEDED(romfsInit());
     
     PrintConsole topScreen, bottomScreen;
     consoleInit(GFX_TOP, &topScreen);
@@ -553,6 +628,12 @@ int main(int argc, char **argv) {
     
     if (log_to_file) {
         freopen(LOG_FILE, "w", stdout);
+    }
+
+    if (!romfs_mounted) {
+        print_status("romfsInit failed - no CA bundle, cannot verify TLS!");
+        svcSleepThread(2000000000ULL);
+        goto exit_no_soc;
     }
 
     socBuffer = (u32*)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
@@ -575,6 +656,16 @@ int main(int argc, char **argv) {
         goto exit_curl_fail;
     }
 
+    // One handle reused for every request in this run: same-host connections
+    // (TCP + TLS session) get kept alive across calls instead of every one
+    // of the ~18 category requests and every core-data batch paying for its
+    // own handshake, which was the biggest single cost in the total load time.
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        print_status("curl_easy_init failed!");
+        goto exit_curl_handle_fail;
+    }
+
     rmrf(CACHE_DIR);
     init_paths();
     
@@ -586,7 +677,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         print_status("Fetching category %d/%d...", i + 1, NUM_CATEGORIES);
         ModData *cat_mods = NULL;
-        int cat_count = fetch_category(CATEGORIES[i], &cat_mods);
+        int cat_count = fetch_category(curl, CATEGORIES[i], &cat_mods);
         if (cat_count > 0 && cat_mods) {
             ModData *tmp = (ModData *)realloc(all_mods, sizeof(ModData) * (total_count + cat_count));
             if (!tmp) {
@@ -596,8 +687,8 @@ int main(int argc, char **argv) {
             all_mods = tmp;
             memcpy(all_mods + total_count, cat_mods, sizeof(ModData) * cat_count);
             total_count += cat_count;
-            free(cat_mods);
         }
+        free(cat_mods); // fetch_category can allocate even when cat_count is 0
     }
 
     if (total_count > 0 && all_mods) {
@@ -605,7 +696,7 @@ int main(int argc, char **argv) {
         
         qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_id);
         
-        fetch_core_data(all_mods, total_count);
+        fetch_core_data(curl, all_mods, total_count);
         
         write_mods_json(MOD_LIST_FILE, all_mods, total_count, 0);
         write_mods_sorted(BY_NAME_FILE, all_mods, total_count, 1);
@@ -632,6 +723,9 @@ int main(int argc, char **argv) {
         }
     }
 
+    curl_easy_cleanup(curl);
+
+exit_curl_handle_fail:
     curl_global_cleanup();
 
 exit_curl_fail:
@@ -641,7 +735,8 @@ exit_sslc_fail:
 exit_soc_fail:
     free(socBuffer);
 exit_no_soc:
-    
+    if (romfs_mounted) romfsExit();
+
     gfxExit();
     return 0;
 }
