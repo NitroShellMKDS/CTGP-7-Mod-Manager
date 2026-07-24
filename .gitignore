@@ -35,7 +35,14 @@
 *.i*86
 *.x86_64
 *.hex
+*.elf
 *.3dsx
+*.cia
+
+# Compiled crap
+build/
+*.bin
+*.smdh
 
 # Debug files
 *.dSYM/
@@ -43,9 +50,6 @@
 *.idb
 *.pdb
 *.lst
-
-# 3DS icon file
-*.smdh
 
 # Kernel Module Compile Results
 *.mod*

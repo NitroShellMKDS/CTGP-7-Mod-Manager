@@ -9,7 +9,26 @@ endif
 TOPDIR ?= $(CURDIR)
 include $(DEVKITARM)/3ds_rules
 
-TARGET		:=	$(notdir $(CURDIR))
+#---------------------------------------------------------------------------------
+# External tools
+#---------------------------------------------------------------------------------
+ifeq ($(OS),Windows_NT)
+MAKEROM 	?= makerom.exe
+BANNERTOOL 	?= bannertool.exe
+else
+MAKEROM 	?= makerom
+BANNERTOOL 	?= bannertool
+endif
+
+RSF_FILE	:=	app/build-cia.rsf
+BNR_IMAGE	:=	app/banner.cgfx
+BNR_AUDIO	:=	app/audio.wav
+ICON		:=	app/icon.png
+
+APP_TITLE		:=	CTGP-7 Mod Manager
+APP_AUTHOR		:=	NitroShell and Bonkmaykr
+
+TARGET		:=	CTGP-7-Mod-Manager
 BUILD		:=	build
 SOURCES		:=	source
 INCLUDES	:=	include
@@ -115,13 +134,26 @@ endif
 # Ensure $(DEPSDIR) is thoroughly cleaned
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(DEPSDIR)
+	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(OUTPUT).cia $(DEPSDIR)
+	@rm -f app/banner.bin app/icon.bin
 
 else
+
+.PHONY: all
+
+all: $(OUTPUT).3dsx $(OUTPUT).cia
 
 $(OUTPUT).3dsx	:	$(OUTPUT).elf $(_3DSXDEPS)
 $(OFILES_SOURCES) : $(HFILES)
 $(OUTPUT).elf	:	$(OFILES)
+
+$(OUTPUT).cia	:	$(OUTPUT).elf $(OUTPUT).smdh
+	@$(BANNERTOOL) makebanner -ci "../app/banner.cgfx" -a "../app/audio.wav" -o "../app/banner.bin"
+
+	@$(BANNERTOOL) makesmdh -i "../app/icon.png" -s "$(TARGET)" -l "$(APP_TITLE)" -p "$(APP_AUTHOR)" -o "../app/icon.bin" \
+		--flags visible,ratingrequired --cero 153 --esrb 153 --usk 153 --pegigen 153 --pegiptr 153 --pegibbfc 153 --cob 153 --grb 153 --cgsrr 153
+
+	@$(MAKEROM) -f cia -target t -exefslogo -o "$(OUTPUT).cia" -elf "$(OUTPUT).elf" -rsf "../app/build-cia.rsf" -banner "../app/banner.bin" -icon "../app/icon.bin" -DAPP_ROMFS=".."
 
 %.bin.o	%_bin.h :	%.bin
 	@echo $(notdir $<)
