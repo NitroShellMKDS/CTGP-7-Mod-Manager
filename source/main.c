@@ -181,7 +181,6 @@ static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *use
 }
 
 static void free_fetch_result(FetchResult *result);
-static void print_status(const char* format, ...);
 
 static FetchResult curl_get(CURL *curl, const char *url) {
     FetchResult result;
@@ -681,7 +680,7 @@ int main(int argc, char **argv) {
 
     svcSleepThread(1500000000ULL);
 
-    print_status("Press START to exit.\n");
+    printf("Press START to exit.\n");
     // above here needs to be on another thread
 
     while (aptMainLoop()) {
