@@ -30,8 +30,8 @@ APP_AUTHOR	:= NitroShell and Bonkmaykr
 
 TARGET		:= CTGP-7-Mod-Manager
 BUILD		:= build
-SOURCES		:= source deps/imgui-3ds/imgui
-INCLUDES	:= include deps/imgui-3ds
+SOURCES		:= source imgui/imgui
+INCLUDES	:= include imgui
 ROMFS		:= romfs
 
 #---------------------------------------------------------------------------------
