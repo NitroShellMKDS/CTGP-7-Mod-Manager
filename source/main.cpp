@@ -23,6 +23,9 @@
 #include <cstddef>
 #include <unordered_map>
 
+#include "imgui/imgui.h"
+#include "imgui/imgui_sw.h"
+
 /* -------------------------------------------------------------------------- */
 /*  Constants                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -580,11 +583,22 @@ int main(int argc, char **argv) {
     C3D_RenderTarget* top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     C3D_RenderTarget* bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(320.0f, 240.0f);
+    imgui_sw::bind_imgui_painting();
+    imgui_sw::SwOptions sw_options;
+    imgui_sw::make_style_fast();
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0x15 / 255.0f, 0x1D / 255.0f, 0x23 / 255.0f, 1.0f);
+    style.WindowRounding = 0.0f;
+    style.WindowPadding = ImVec2(0.0f, 0.0f);
+
     // Screen color: #151d23 | Text color: #ABA022
     u32 clrClear = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
     u32 clrText = C2D_Color32(0xAB, 0xA0, 0x22, 0xFF);
 
-    C2D_TextBuf dynamicBuf = C2D_TextBufNew(4096);
     Thread fetchThread = nullptr;
 
     bool romfs_mounted = R_SUCCEEDED(romfsInit());
@@ -643,28 +657,44 @@ main_loop:
         C2D_TargetClear(top, clrClear);
         C2D_SceneBegin(top);
 
-        // Bottom screen: Render the loading text centered
+        // Bottom screen: Render the loading text centered via ImGui
         C2D_TargetClear(bottom, clrClear);
         C2D_SceneBegin(bottom);
 
-        C2D_TextBufClear(dynamicBuf);
-        C2D_Text text;
-        C2D_TextParse(&text, dynamicBuf, currentText.c_str());
-        C2D_TextOptimize(&text);
+        ImGui::NewFrame();
+        {
+            ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+            ImGui::SetNextWindowSize(ImVec2(320.0f, 240.0f));
+            ImGui::Begin("Status", nullptr,
+                ImGuiWindowFlags_NoTitleBar |
+                ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoScrollbar |
+                ImGuiWindowFlags_NoSavedSettings);
 
-        // The default system font height is approximately ~30px. 
-        // 16.0f / 30.0f = ~0.53f scaling
-        float scale = 0.5333f;
-        float textWidth, textHeight;
-        C2D_TextGetDimensions(&text, scale, scale, &textWidth, &textHeight);
+            ImVec2 textSize = ImGui::CalcTextSize(currentText.c_str());
+            float x = (320.0f - textSize.x) / 2.0f;
+            float y = (240.0f - textSize.y) / 2.0f;
 
-        // Center on the 320x240 bottom screen
-        float x = (320.0f - textWidth) / 2.0f;
-        float y = (240.0f - textHeight) / 2.0f;
+            ImVec4 textColor = ImVec4(
+                ((clrText >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
+                ((clrText >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
+                ((clrText >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
+                ((clrText >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f
+            );
 
-        // Simulate bold text by drawing it twice with a slight 1px horizontal offset
-        C2D_DrawText(&text, C2D_WithColor, x + 1.0f, y, 0.5f, scale, scale, clrText);
-        C2D_DrawText(&text, C2D_WithColor, x, y, 0.5f, scale, scale, clrText);
+            ImGui::SetCursorPos(ImVec2(x + 1.0f, y));
+            ImGui::TextColored(textColor, "%s", currentText.c_str());
+            ImGui::SetCursorPos(ImVec2(x, y));
+            ImGui::TextColored(textColor, "%s", currentText.c_str());
+
+            ImGui::End();
+        }
+        ImGui::Render();
+
+        C2D_Prepare();
+        imgui_sw::paint_imgui(320, 240, sw_options);
+        C2D_Flush();
 
         C3D_FrameEnd(0);
     }
@@ -682,7 +712,6 @@ main_loop:
     }
     if (romfs_mounted) romfsExit();
 
-    C2D_TextBufDelete(dynamicBuf);
     C2D_Fini();
     C3D_Fini();
     gfxExit();
