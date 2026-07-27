@@ -1,4 +1,6 @@
 #include <3ds.h>
+#include <citro2d.h>
+#include <citro3d.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 
@@ -48,9 +50,6 @@ static constexpr int CATEGORIES[] = {
 };
 static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 
-#define CONSOLE_COLS 40
-#define CONSOLE_ROWS 30
-
 #define BASE_DIR               "sdmc:/"
 #define APP_DIR                BASE_DIR "3ds/CTGP-7-Mod-Manager/"
 #define CACHE_DIR              APP_DIR "cache/"
@@ -63,7 +62,7 @@ static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[
 #define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
 
 /* -------------------------------------------------------------------------- */
-/*  Data Structures                                                           */
+/*  Data Structures & Globals for Rendering                                   */
 /* -------------------------------------------------------------------------- */
 
 struct ModData {
@@ -82,11 +81,26 @@ struct FetchResult {
     bool        success       = false;
 };
 
+static LightLock status_lock;
+static std::string g_statusText = "Initializing...";
+static bool g_fetchDone = false;
+static bool g_fetchSuccess = false;
+
 /* -------------------------------------------------------------------------- */
-/*  Forward declarations                                                      */
+/*  Logging (Thread-Safe)                                                     */
 /* -------------------------------------------------------------------------- */
 
-static void print_status(const char* format, ...);
+static void print_status(const char* format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    LightLock_Lock(&status_lock);
+    g_statusText = buffer;
+    LightLock_Unlock(&status_lock);
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Filesystem helpers                                                        */
@@ -112,7 +126,6 @@ static int rmrf(const char *path) {
             } else if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
                 if (unlink(fullpath.c_str()) != 0) { closedir(d); return -1; }
             } else {
-                /* Special files: attempt removal, but don’t hard-fail */
                 unlink(fullpath.c_str());
             }
         } else if (errno != ENOENT) {
@@ -134,13 +147,13 @@ static bool mkdir_p(const char *path) {
         if (buf[i] == '/') {
             std::string sub_path = buf.substr(0, i);
             if (mkdir(sub_path.c_str(), 0777) != 0 && errno != EEXIST) {
-                print_status("mkdir_p: failed to create ‘%s’ (errno=%d)", sub_path.c_str(), errno);
+                print_status("mkdir_p: failed to create ‘%s’", sub_path.c_str());
                 return false;
             }
         }
     }
     if (mkdir(buf.c_str(), 0777) != 0 && errno != EEXIST) {
-        print_status("mkdir_p: failed to create ‘%s’ (errno=%d)", path, errno);
+        print_status("mkdir_p: failed to create ‘%s’", path);
         return false;
     }
     return true;
@@ -162,38 +175,11 @@ static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *use
     auto *result = static_cast<std::string*>(userp);
 
     if (total > 0 && result->size() + total > MAX_RESPONSE_SIZE) {
-        print_status("Response exceeds %zu bytes, aborting transfer", MAX_RESPONSE_SIZE);
         return 0;  /* Signal unrecoverable error to libcurl */
     }
 
     result->append(static_cast<char*>(contents), total);
     return total;
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Logging                                                                   */
-/* -------------------------------------------------------------------------- */
-
-static void print_status(const char* format, ...) {
-    char buffer[256];
-    va_list args;
-    va_start(args, format);
-    int len = vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    if (len < 0) return;
-
-    const int MAX_VISIBLE = CONSOLE_COLS - 3;
-    if (len > MAX_VISIBLE && MAX_VISIBLE > 0) {
-        memcpy(buffer + MAX_VISIBLE, "...", 3);
-        buffer[MAX_VISIBLE + 3] = '\0';
-        len = MAX_VISIBLE + 3;
-    }
-
-    int col = (CONSOLE_COLS - len) / 2 + 1;
-    if (col < 1) col = 1;
-    printf("\x1b[15;1H\x1b[2K\x1b[1m\x1b[15;%dH%s", col, buffer);
-    fflush(stdout);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -410,20 +396,13 @@ static void fetch_category(CURL *curl, int cat_id, std::vector<ModData>& out_mod
 
 static void deduplicate_mods(std::vector<ModData>& mods) {
     if (mods.size() <= 1) return;
-
-    std::sort(mods.begin(), mods.end(),
-              [](const ModData& a, const ModData& b) { return a.Id < b.Id; });
-
-    auto last = std::unique(mods.begin(), mods.end(),
-                            [](const ModData& a, const ModData& b) {
-                                return a.Id == b.Id;
-                            });
+    std::sort(mods.begin(), mods.end(), [](const ModData& a, const ModData& b) { return a.Id < b.Id; });
+    auto last = std::unique(mods.begin(), mods.end(), [](const ModData& a, const ModData& b) { return a.Id == b.Id; });
     mods.erase(last, mods.end());
 }
 
 static void parse_latest_file(json_object *raw_item, ModData& mod) {
     json_object *item = raw_item;
-
     if (json_object_get_type(raw_item) == json_type_array) {
         int arr_len = json_object_array_length(raw_item);
         if (arr_len > 0) item = json_object_array_get_idx(raw_item, 0);
@@ -511,7 +490,6 @@ static void fetch_core_data(CURL *curl, std::vector<ModData>& mods) {
         for (int k = 0; k < arr_len && k < static_cast<int>(batch_ptrs.size()); k++) {
             json_object *item = json_object_array_get_idx(root, k);
             if (!item) continue;
-
             parse_latest_file(item, *batch_ptrs[k]);
         }
         json_object_put(root);
@@ -519,71 +497,17 @@ static void fetch_core_data(CURL *curl, std::vector<ModData>& mods) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Entry point                                                               */
+/*  Background Fetch Thread                                                   */
 /* -------------------------------------------------------------------------- */
 
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-
-    CURL *curl = nullptr;
+static void fetch_thread_func(void* arg) {
+    (void)arg;
+    CURL *curl = curl_easy_init();
     bool fetch_succeeded = false;
 
-    gfxInitDefault();
-
-    bool romfs_mounted = R_SUCCEEDED(romfsInit());
-
-    PrintConsole topScreen, bottomScreen;
-    consoleInit(GFX_TOP,    &topScreen);
-    consoleInit(GFX_BOTTOM, &bottomScreen);
-
-    consoleSelect(&topScreen);
-    printf("\x1b[48;2;21;29;35m\x1b[2J");
-
-    consoleSelect(&bottomScreen);
-    printf("\x1b[38;2;171;160;34m\x1b[48;2;21;29;35m\x1b[2J");
-
-    print_status("GamebananaFetcher 3DS Port (C++)");
-
-    if (!romfs_mounted) {
-        print_status("romfsInit failed - no CA bundle, cannot verify TLS!");
-        svcSleepThread(2000000000ULL);
-        goto exit_no_soc;
-    }
-
-    {
-        struct stat sb;
-        if (stat("romfs:/cacert.pem", &sb) != 0) {
-            print_status("Fatal: CA bundle missing from ROMFS");
-            svcSleepThread(2000000000ULL);
-            goto exit_no_soc;
-        }
-    }
-
-    socBuffer = static_cast<u32*>(memalign(SOC_ALIGN, SOC_BUFFERSIZE));
-    if (!socBuffer) {
-        print_status("Failed to allocate SOC buffer!");
-        goto exit_no_soc;
-    }
-    if (R_FAILED(socInit(socBuffer, SOC_BUFFERSIZE))) {
-        print_status("socInit failed!");
-        goto exit_soc_fail;
-    }
-
-    if (R_FAILED(sslcInit(0))) {
-        print_status("sslcInit failed!");
-        goto exit_sslc_fail;
-    }
-
-    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
-        print_status("curl_global_init failed!");
-        goto exit_curl_fail;
-    }
-
-    curl = curl_easy_init();
     if (!curl) {
         print_status("curl_easy_init failed!");
-        goto exit_curl_handle_fail;
+        goto exit_thread;
     }
 
     rmrf(CACHE_DIR);
@@ -613,19 +537,14 @@ int main(int argc, char **argv) {
                 print_status("Error saving mod list!");
             }
 
-            std::sort(all_mods.begin(), all_mods.end(),
-                      [](const ModData& a, const ModData& b) { return a.Name < b.Name; });
+            std::sort(all_mods.begin(), all_mods.end(), [](const ModData& a, const ModData& b) { return a.Name < b.Name; });
             write_mods_json(BY_NAME_FILE, all_mods);
 
-            std::sort(all_mods.begin(), all_mods.end(),
-                      [](const ModData& a, const ModData& b) {
-                          return a.LatestFileDate > b.LatestFileDate;
-                      });
+            std::sort(all_mods.begin(), all_mods.end(), [](const ModData& a, const ModData& b) { return a.LatestFileDate > b.LatestFileDate; });
             write_mods_json(BY_UPDATED_FILE, all_mods);
 
             fetch_succeeded = (enriched > 0);
-            print_status("Done! Enriched %zu/%zu mods.",
-                         enriched, all_mods.size());
+            print_status("Done! Enriched %zu/%zu mods.", enriched, all_mods.size());
         } else {
             print_status("Failed to fetch any mods!");
         }
@@ -634,28 +553,139 @@ int main(int argc, char **argv) {
     svcSleepThread(POST_FETCH_DELAY_NS);
     print_status("Press START to exit.");
 
+    curl_easy_cleanup(curl);
+
+exit_thread:
+    LightLock_Lock(&status_lock);
+    g_fetchSuccess = fetch_succeeded;
+    g_fetchDone = true;
+    LightLock_Unlock(&status_lock);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Entry point                                                               */
+/* -------------------------------------------------------------------------- */
+
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+
+    LightLock_Init(&status_lock);
+
+    gfxInitDefault();
+    C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+    C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
+    C2D_Prepare();
+
+    C3D_RenderTarget* top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+    C3D_RenderTarget* bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
+
+    // Screen color: #151d23 | Text color: #ABA022
+    u32 clrClear = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
+    u32 clrText = C2D_Color32(0xAB, 0xA0, 0x22, 0xFF);
+
+    C2D_TextBuf dynamicBuf = C2D_TextBufNew(4096);
+    Thread fetchThread = nullptr;
+
+    bool romfs_mounted = R_SUCCEEDED(romfsInit());
+    if (!romfs_mounted) {
+        print_status("romfsInit failed - no CA bundle!");
+        g_fetchDone = true;
+        goto main_loop;
+    }
+
+    {
+        struct stat sb;
+        if (stat("romfs:/cacert.pem", &sb) != 0) {
+            print_status("Fatal: CA bundle missing from ROMFS");
+            g_fetchDone = true;
+            goto main_loop;
+        }
+    }
+
+    socBuffer = static_cast<u32*>(memalign(SOC_ALIGN, SOC_BUFFERSIZE));
+    if (!socBuffer || R_FAILED(socInit(socBuffer, SOC_BUFFERSIZE))) {
+        print_status("socInit failed!");
+        g_fetchDone = true;
+        goto main_loop;
+    }
+
+    if (R_FAILED(sslcInit(0))) {
+        print_status("sslcInit failed!");
+        g_fetchDone = true;
+        goto main_loop;
+    }
+
+    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
+        print_status("curl_global_init failed!");
+        g_fetchDone = true;
+        goto main_loop;
+    }
+
+    // Launch background thread so UI doesn't freeze
+    fetchThread = threadCreate(fetch_thread_func, NULL, 64 * 1024, 0x3F, -2, true);
+
+main_loop:
     while (aptMainLoop()) {
-        gspWaitForVBlank();
         hidScanInput();
-        if (hidKeysDown() & KEY_START) break;
+        u32 kDown = hidKeysDown();
+
+        LightLock_Lock(&status_lock);
+        bool done = g_fetchDone;
+        std::string currentText = g_statusText;
+        LightLock_Unlock(&status_lock);
+
+        if (done && (kDown & KEY_START)) break;
+
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+        // Top screen: just clear it to background color
+        C2D_TargetClear(top, clrClear);
+        C2D_SceneBegin(top);
+
+        // Bottom screen: Render the loading text centered
+        C2D_TargetClear(bottom, clrClear);
+        C2D_SceneBegin(bottom);
+
+        C2D_TextBufClear(dynamicBuf);
+        C2D_Text text;
+        C2D_TextParse(&text, dynamicBuf, currentText.c_str());
+        C2D_TextOptimize(&text);
+
+        // The default system font height is approximately ~30px. 
+        // 16.0f / 30.0f = ~0.53f scaling
+        float scale = 0.5333f;
+        float textWidth, textHeight;
+        C2D_TextGetDimensions(&text, scale, scale, &textWidth, &textHeight);
+
+        // Center on the 320x240 bottom screen
+        float x = (320.0f - textWidth) / 2.0f;
+        float y = (240.0f - textHeight) / 2.0f;
+
+        // Simulate bold text by drawing it twice with a slight 1px horizontal offset
+        C2D_DrawText(&text, C2D_WithColor, x + 1.0f, y, 0.5f, scale, scale, clrText);
+        C2D_DrawText(&text, C2D_WithColor, x, y, 0.5f, scale, scale, clrText);
+
+        C3D_FrameEnd(0);
     }
 
-    if (curl) {
-        curl_easy_cleanup(curl);
-        curl = nullptr;
+    if (fetchThread) {
+        threadJoin(fetchThread, U64_MAX);
+        threadFree(fetchThread);
     }
 
-exit_curl_handle_fail:
     curl_global_cleanup();
-exit_curl_fail:
     sslcExit();
-exit_sslc_fail:
-    socExit();
-exit_soc_fail:
-    free(socBuffer);
-exit_no_soc:
+    if (socBuffer) {
+        socExit();
+        free(socBuffer);
+    }
     if (romfs_mounted) romfsExit();
 
+    C2D_TextBufDelete(dynamicBuf);
+    C2D_Fini();
+    C3D_Fini();
     gfxExit();
-    return fetch_succeeded ? 0 : 1;
+
+    return g_fetchSuccess ? 0 : 1;
 }
