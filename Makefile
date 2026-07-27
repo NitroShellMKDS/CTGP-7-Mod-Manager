@@ -50,6 +50,8 @@ LDFLAGS		:= -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sect
 LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -lz -lcitro2d -lcitro3d -lctru -lm
 LIBDIRS	:= $(PORTLIBS) $(CTRULIB)
 
+imgui_sw.o : CXXFLAGS += -Wno-unused-variable -Wno-unused-parameter -Wno-unused-function
+
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 
 export OUTPUT	:= $(CURDIR)/$(TARGET)
