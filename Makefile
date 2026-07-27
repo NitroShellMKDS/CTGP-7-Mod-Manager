@@ -30,8 +30,8 @@ APP_AUTHOR		:=	NitroShell and Bonkmaykr
 
 TARGET		:=	CTGP-7-Mod-Manager
 BUILD		:=	build
-SOURCES		:=	source
-INCLUDES	:=	include
+SOURCES		:=	source deps/imgui-3ds/imgui deps/imgui_citro3d
+INCLUDES	:=	include deps/imgui-3ds/imgui deps/imgui_citro3d
 ROMFS		:=	romfs
 
 #---------------------------------------------------------------------------------
@@ -44,7 +44,7 @@ ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 # Added -fdata-sections to pair with -ffunction-sections.
 CFLAGS	:=	-g -Wall -Wextra -Os -mword-relocations \
 			-ffunction-sections -fdata-sections \
-			$(ARCH)
+			-fpermissive $(ARCH)
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__
 
@@ -56,7 +56,7 @@ ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
 
 # Dependency order: libcurl -> mbedtls -> libctru (soc/sslc)
-LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -lz -lctru -lm
+LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -lz -lcitro3d -lctru -lm
 
 LIBDIRS	:= $(PORTLIBS) $(CTRULIB)
 

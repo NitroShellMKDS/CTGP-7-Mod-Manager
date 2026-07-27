@@ -1,4 +1,5 @@
 #include <3ds.h>
+#include <citro3d.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 #include <stdio.h>
@@ -28,13 +29,12 @@ static const char *CA_BUNDLE_PATH = "romfs:/cacert.pem";
 #define MAX_RESPONSE_SIZE (512 * 1024)
 
 #define MAX_FETCH_ATTEMPTS 4
-#define RETRY_BASE_DELAY_NS 500000000ULL 
+#define RETRY_BASE_DELAY_NS 500000000ULL
 
 static const int CATEGORIES[] = {35931, 10605, 35932, 35943, 35933, 35935, 35937, 35938, 35939, 35941, 35942, 35944, 35946, 35947, 35945, 35940, 35934, 35936};
 static const int NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 
-#define CONSOLE_COLS 40
-#define CONSOLE_ROWS 30
+static const bool log_to_file = true;
 
 #define MAX_PATH 512
 #define MAX_URL 2048
@@ -47,6 +47,7 @@ static const int NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 #define CTGP7_DIR BASE_DIR "CTGP-7/MyStuff/Characters/"
 
 #define STATE_FILE APP_DIR "installed_mods.json"
+#define LOG_FILE APP_DIR "log.txt"
 #define MOD_LIST_FILE LISTS_DIR "modlist.json"
 #define BY_NAME_FILE LISTS_DIR "byname.json"
 #define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
@@ -69,9 +70,14 @@ typedef struct {
     bool success;
 } FetchResult;
 
+// recursive delete because newlib does not have POSIX extensions
+// Kagi Assistant, audited for errors
 static int rmrf(const char *path) {
     DIR *d = opendir(path);
-    if (!d) return -1;
+    if (!d) {
+        perror("opendir");
+        return -1;
+    }
 
     struct dirent *entry;
     while ((entry = readdir(d)) != NULL) {
@@ -97,18 +103,26 @@ static int rmrf(const char *path) {
                 }
             } else {
                 if (unlink(fullpath) != 0) {
+                    perror("unlink");
                     closedir(d);
                     return -1;
                 }
             }
         } else if (errno != ENOENT) {
+            perror(fullpath); // failing here is normal, but we print the path incase our str building is wrong
             closedir(d);
             return -1;
         }
     }
 
     closedir(d);
-    return rmdir(path) == 0 ? 0 : -1;
+
+    if (rmdir(path) != 0) {
+        perror("rmdir");
+        return -1;
+    }
+
+    return 0;
 }
 
 static void mkdir_p(const char *path) {
@@ -148,7 +162,7 @@ static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *use
     FetchResult *result = (FetchResult *)userp;
 
     if (result->size + total + 1 > MAX_RESPONSE_SIZE) {
-        return 0; 
+        return 0;
     }
 
     if (result->size + total + 1 > result->capacity) {
@@ -166,8 +180,7 @@ static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *use
     return (size_t)total;
 }
 
-static void free_fetch_result(FetchResult *result); 
-static void print_status(const char* format, ...);
+static void free_fetch_result(FetchResult *result);
 
 static FetchResult curl_get(CURL *curl, const char *url) {
     FetchResult result;
@@ -206,7 +219,7 @@ static FetchResult curl_get(CURL *curl, const char *url) {
             }
         }
     } else {
-        print_status("cURL Error: %s", curl_easy_strerror(res));
+        printf("cURL Error: %s\n", curl_easy_strerror(res));
     }
 
     return result;
@@ -304,7 +317,7 @@ static bool write_mods_json(const char *filename, ModData *mods, int count) {
     }
     fprintf(f, "]\n");
     fflush(f);
-    
+
     if (ferror(f)) {
         fclose(f);
         return false;
@@ -335,28 +348,14 @@ static int compare_mods_by_id(const void *a, const void *b) {
     return 0;
 }
 
-static void print_status(const char* format, ...) {
-    char buffer[256];
-    va_list args;
-    va_start(args, format);
-    int len = vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    if (len < 0) return;
-    if ((size_t)len >= sizeof(buffer)) {
-        buffer[sizeof(buffer)-4] = '.';
-        buffer[sizeof(buffer)-3] = '.';
-        buffer[sizeof(buffer)-2] = '.';
-        buffer[sizeof(buffer)-1] = '\0';
-        len = sizeof(buffer) - 1;
-    }
-
-    if (len > CONSOLE_COLS) len = CONSOLE_COLS; 
-    int col = (CONSOLE_COLS - len) / 2 + 1;
-    
-    // Removed \x1b[0m and restored a 24-bit text color code (\x1b[38;2;R;G;Bm) if you had a specific text color
-    printf("\x1b[15;1H\x1b[2K\x1b[1m\x1b[15;%dH%s", col, buffer);
-    fflush(stdout); 
+static void write_mods_sorted(const char *filename, ModData *mods, int count, int by_name) {
+    ModData *sorted = (ModData *)malloc(sizeof(ModData) * count);
+    if (!sorted) return;
+    memcpy(sorted, mods, sizeof(ModData) * count);
+    if (by_name) qsort(sorted, count, sizeof(ModData), compare_mods_by_name);
+    else qsort(sorted, count, sizeof(ModData), compare_mods_by_updated);
+    write_mods_json(filename, sorted, count, 0);
+    free(sorted);
 }
 
 static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
@@ -367,8 +366,8 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
     FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
     if (!result.success) {
         free_fetch_result(&result);
-        print_status("Category %d failed after retries, skipping", cat_id);
-        svcSleepThread(700000000ULL); 
+        printf("Category %d failed after retries, skipping\n", cat_id);
+        svcSleepThread(700000000ULL);
         return 0;
     }
 
@@ -403,10 +402,10 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
         ModData mod;
         memset(&mod, 0, sizeof(mod));
         mod.Id = id;
-        
+
         const char *sName = get_json_string(record, "_sName");
         if (sName) snprintf(mod.Name, sizeof(mod.Name), "%s", sName);
-        
+
         snprintf(mod.Author, sizeof(mod.Author), "Unknown");
 
         json_object *submitter;
@@ -423,11 +422,11 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
                 for (int j = 0; j < img_count && j < 1; j++) {
                     json_object *img = json_object_array_get_idx(images, j);
                     if (!img || json_object_get_type(img) != json_type_object) continue;
-                    
+
                     const char *base_url = get_json_string(img, "_sBaseUrl");
                     const char *file220 = get_json_string(img, "_sFile220");
                     const char *file = get_json_string(img, "_sFile");
-                    
+
                     if (base_url && file220 && base_url[0] && file220[0]) {
                         snprintf(mod.ThumbnailUrl, sizeof(mod.ThumbnailUrl), "%s/%s", base_url, file220);
                     } else if (base_url && file && base_url[0] && file[0]) {
@@ -445,9 +444,9 @@ static int fetch_category(CURL *curl, int cat_id, ModData **out_mods) {
 
 static int deduplicate_mods(ModData *mods, int count) {
     if (count <= 1) return count;
-    
+
     qsort(mods, count, sizeof(ModData), compare_mods_by_id);
-    
+
     int unique_count = 0;
     for (int i = 0; i < count; i++) {
         if (i == 0 || mods[i].Id != mods[i-1].Id) {
@@ -519,7 +518,7 @@ static void parse_latest_file(json_object *item, ModData *mod) {
 }
 
 static void fetch_core_data(CURL *curl, ModData *mods, int count) {
-    print_status("Fetching core data for %d items...", count);
+    printf("Fetching core data for %d items...\n", count);
 
     const int BATCH_SIZE = 20;
 
@@ -527,7 +526,7 @@ static void fetch_core_data(CURL *curl, ModData *mods, int count) {
         char url[MAX_URL];
         int url_len = snprintf(url, sizeof(url), "%s?", API_CORE_DATA);
         if (url_len < 0 || (size_t)url_len >= sizeof(url)) continue;
-        
+
         int current_batch = 0;
         ModData* batch_ptrs[BATCH_SIZE];
         
@@ -552,14 +551,14 @@ static void fetch_core_data(CURL *curl, ModData *mods, int count) {
             url[url_len-1] = '\0';
         }
         
-        print_status("[%d/%d] Fetching batch of %d mods...", 
-               (i + current_batch > count ? count : i + current_batch), 
+        printf("[%d/%d] Fetching batch of %d mods...\n",
+               (i + current_batch > count ? count : i + current_batch),
                count, current_batch);
                
         FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
         if (!result.success) {
             free_fetch_result(&result);
-            print_status("Batch fetch failed after retries.");
+            printf("Batch fetch failed after retries.\n");
             svcSleepThread(700000000ULL);
             return;
         }
@@ -585,73 +584,64 @@ static void fetch_core_data(CURL *curl, ModData *mods, int count) {
     }
 }
 
+extern int gui(); // gui.cpp
+
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-    
-    CURL *curl = NULL; // Initialize to NULL at the top
-
     gfxInitDefault();
-
-    bool romfs_mounted = R_SUCCEEDED(romfsInit());
-    
-    PrintConsole topScreen, bottomScreen;
-    consoleInit(GFX_TOP, &topScreen);
-    consoleInit(GFX_BOTTOM, &bottomScreen);
-
-    consoleSelect(&topScreen);
-    printf("\x1b[48;2;21;29;35m\x1b[2J");
-
-    consoleSelect(&bottomScreen);
-    printf("\x1b[38;2;171;160;34m"); // Text color
-    printf("\x1b[48;2;21;29;35m");   // Background color
-    printf("\x1b[2J");               // Clear screen to apply background
-
-    print_status("GamebananaFetcher 3DS Port");
+    consoleInit(GFX_TOP, NULL);
+    printf("\x1b[1;1HGamebananaFetcher 3DS Port\n");
+    if (log_to_file) {
+        // this doesn't need a str substitution but i'm leaving it here incase
+        printf("Logging to %s\n", LOG_FILE);
+        freopen(LOG_FILE, "w", stdout);
+    }
 
     if (!romfs_mounted) {
-        print_status("romfsInit failed - no CA bundle, cannot verify TLS!");
+        printf("romfsInit failed - no CA bundle, cannot verify TLS!\n");
         svcSleepThread(2000000000ULL);
         goto exit_no_soc;
     }
 
+    if (gui()) goto exit_no_gui;
+
+    // below here needs to be on another thread
+
     socBuffer = (u32*)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
     if (!socBuffer) {
-        print_status("Failed to allocate SOC buffer!");
+        printf("Failed to allocate SOC buffer!\n");
         goto exit_no_soc;
     }
     if (R_FAILED(socInit(socBuffer, SOC_BUFFERSIZE))) {
-        print_status("socInit failed!");
+        printf("socInit failed!\n");
         goto exit_soc_fail;
     }
 
     if (R_FAILED(sslcInit(0))) {
-        print_status("sslcInit failed!");
+        printf("sslcInit failed!\n");
         goto exit_sslc_fail;
     }
 
     if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
-        print_status("curl_global_init failed!");
+        printf("curl_global_init failed!\n");
         goto exit_curl_fail;
     }
 
-    // Remove the "CURL *" since it's already declared
-    curl = curl_easy_init(); 
+    curl = curl_easy_init();
     if (!curl) {
-        print_status("curl_easy_init failed!");
+        printf("curl_easy_init failed!\n");
         goto exit_curl_handle_fail;
     }
 
     rmrf(CACHE_DIR);
     init_paths();
-    
-    print_status("Fetching %d categories...", NUM_CATEGORIES);
+
+    printf("Fetching %d categories...\n", NUM_CATEGORIES);
 
     ModData *all_mods = NULL;
     int total_count = 0;
 
     for (int i = 0; i < NUM_CATEGORIES; i++) {
-        print_status("Fetching category %d/%d...", i + 1, NUM_CATEGORIES);
+        printf("Fetching category %d/%d...\n", i + 1, NUM_CATEGORIES);
         ModData *cat_mods = NULL;
         int cat_count = fetch_category(curl, CATEGORIES[i], &cat_mods);
         if (cat_count > 0 && cat_mods) {
@@ -668,12 +658,12 @@ int main(int argc, char **argv) {
     }
 
     if (total_count > 0 && all_mods) {
-        total_count = deduplicate_mods(all_mods, total_count); 
-        
+        total_count = deduplicate_mods(all_mods, total_count);
+
         fetch_core_data(curl, all_mods, total_count);
         
         if (!write_mods_json(MOD_LIST_FILE, all_mods, total_count)) {
-            print_status("Error saving mod list!");
+            printf("Error saving mod list!\n");
         }
 
         qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_name);
@@ -682,15 +672,16 @@ int main(int argc, char **argv) {
         qsort(all_mods, total_count, sizeof(ModData), compare_mods_by_updated);
         write_mods_json(BY_UPDATED_FILE, all_mods, total_count);
         
-        print_status("Done! Files saved.");
+        printf("Done! Files saved.\n");
         free(all_mods);
     } else {
-        print_status("Failed to fetch any mods!");
+        printf("Failed to fetch any mods!\n");
     }
 
     svcSleepThread(1500000000ULL);
 
-    print_status("Press START to exit.");
+    printf("Press START to exit.\n");
+    // above here needs to be on another thread
 
     while (aptMainLoop()) {
         gspWaitForVBlank();
@@ -698,6 +689,7 @@ int main(int argc, char **argv) {
         if (hidKeysDown() & KEY_START) {
             break;
         }
+        // TODO move this to gui.cpp
     }
 
     curl_easy_cleanup(curl);
@@ -712,6 +704,7 @@ exit_sslc_fail:
 exit_soc_fail:
     free(socBuffer);
 exit_no_soc:
+exit_no_gui:
     if (romfs_mounted) romfsExit();
 
     gfxExit();
