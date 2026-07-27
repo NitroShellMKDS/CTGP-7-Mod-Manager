@@ -594,6 +594,7 @@ int main(int argc, char **argv) {
     style.Colors[ImGuiCol_WindowBg] = ImVec4(0x15 / 255.0f, 0x1D / 255.0f, 0x23 / 255.0f, 1.0f);
     style.WindowRounding = 0.0f;
     style.WindowPadding = ImVec2(0.0f, 0.0f);
+    style.WindowBorderSize = 0.0f;
 
     // Screen color: #151d23 | Text color: #ABA022
     u32 clrClear = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
@@ -683,8 +684,6 @@ main_loop:
                 ((clrText >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f
             );
 
-            ImGui::SetCursorPos(ImVec2(x + 1.0f, y));
-            ImGui::TextColored(textColor, "%s", currentText.c_str());
             ImGui::SetCursorPos(ImVec2(x, y));
             ImGui::TextColored(textColor, "%s", currentText.c_str());
 
