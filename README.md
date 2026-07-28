@@ -21,8 +21,6 @@ _(Note: If you are using MSYS2 on Windows, simply use `pacman` instead of `dkp-p
 
 Once all dependencies are installed, open your terminal, navigate to the project directory, and compile the application by running:
 
-Bash
-
 ```
 make
 ```
