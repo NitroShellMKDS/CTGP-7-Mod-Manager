@@ -26,6 +26,9 @@
 #include "imgui/imgui.h"
 #include "imgui/imgui_sw.h"
 
+#include <3ds/ndsp/ndsp.h>
+#include <tremor/ivorbisfile.h>
+
 /* -------------------------------------------------------------------------- */
 /*  Constants                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -63,6 +66,23 @@ static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[
 #define MOD_LIST_FILE   LISTS_DIR "modlist.json"
 #define BY_NAME_FILE    LISTS_DIR "byname.json"
 #define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
+
+/* -------------------------------------------------------------------------- */
+/*  Audio (libvorbisidec + NDSP)                                              */
+/* -------------------------------------------------------------------------- */
+
+static constexpr int    AUDIO_BUF_SAMPLES   = 4096;   // frames per NDSP wavebuf
+static constexpr int    AUDIO_MAX_CHANNELS  = 1;
+static constexpr int    AUDIO_VOL           = 0x50;
+
+static OggVorbis_File g_ov{};
+static bool           g_loopMode = false;
+static volatile bool  g_audioShouldStop = false;
+static int            g_channels = 1;
+static int            g_rate     = 32768;
+static ndspWaveBuf    g_wavebuf[2];
+static Thread         g_audioThread = nullptr;
+static bool           g_audioPlaying = false;
 
 /* -------------------------------------------------------------------------- */
 /*  Color helpers (easy to set individual drawing text / UI colors)            */
@@ -576,6 +596,182 @@ exit_thread:
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Audio engine (libvorbisidec + NDSP)                                       */
+/* -------------------------------------------------------------------------- */
+
+static size_t ogg_read_cb(void *ptr, size_t size, size_t nmemb, void *datasource) {
+    return fread(ptr, size, nmemb, static_cast<FILE*>(datasource));
+}
+
+static int ogg_seek_cb(void *datasource, ogg_int64_t offset, int whence) {
+    return fseek(static_cast<FILE*>(datasource), static_cast<long>(offset), whence) ? -1 : 0;
+}
+
+static int ogg_close_cb(void *datasource) {
+    return fclose(static_cast<FILE*>(datasource));
+}
+
+static long ogg_tell_cb(void *datasource) {
+    return ftell(static_cast<FILE*>(datasource));
+}
+
+static ov_callbacks g_ovCbs{ogg_read_cb, ogg_seek_cb, ogg_close_cb, ogg_tell_cb};
+
+static bool load_ogg(const char *path, OggVorbis_File *ovf) {
+    ov_clear(ovf);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    int rc = ov_open_callbacks(f, ovf, nullptr, 0, g_ovCbs);
+    if (rc < 0) { fclose(f); return false; }
+    return true;
+}
+
+static void unload_ogg(OggVorbis_File *ovf) {
+    if (ovf) ov_clear(ovf);
+}
+
+static void play_ogg(OggVorbis_File *ovf, bool loop) {
+    if (!ovf) return;
+    g_loopMode = loop;
+
+    vorbis_info *info = ov_info(ovf, -1);
+    if (!info) return;
+
+    g_channels = info->channels < 1 ? 1 : info->channels > 2 ? 2 : info->channels;
+    g_rate     = info->rate;
+
+    ndspChnReset(0);
+    ndspChnSetFormat(0, g_channels == 1 ? NDSP_FORMAT_MONO_PCM16 : NDSP_FORMAT_STEREO_PCM16);
+    ndspChnSetRate(0, static_cast<float>(g_rate));
+
+    float mix[12] = {};
+    mix[0] = mix[1] = AUDIO_VOL / 255.0f;
+    ndspChnSetMix(0, mix);
+    ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+    ndspSetMasterVol(1.0f);
+}
+
+/* Decodes up to `frame_capacity` frames directly into dst (interleaved,
+ * `channels` per frame). Returns the number of frames actually decoded and
+ * sets *eos to true if the stream ended before the buffer was filled.
+ * This decodes straight from libtremor for every call, so it naturally
+ * interleaves decoding with NDSP playback instead of racing ahead to
+ * decode a whole (arbitrarily long) file before any audio is queued. */
+static int decode_frames(OggVorbis_File *ovf, s16 *dst, int frame_capacity, int channels, bool *eos) {
+    *eos = false;
+    const int bytes_capacity = frame_capacity * channels * (int)sizeof(s16);
+    int bytes_done = 0;
+    char *out = reinterpret_cast<char*>(dst);
+
+    while (bytes_done < bytes_capacity) {
+        int bitstream = 0;
+        long br = ov_read(ovf, out + bytes_done, bytes_capacity - bytes_done, &bitstream);
+        if (br == 0) { *eos = true; break; }               /* clean EOF */
+        if (br < 0) continue;                               /* recoverable stream error, retry */
+        bytes_done += static_cast<int>(br);
+    }
+    return bytes_done / (channels * (int)sizeof(s16));
+}
+
+static void audio_thread_func(void *arg) {
+    OggVorbis_File *intro = static_cast<OggVorbis_File*>(arg);
+    if (!intro) { g_audioPlaying = false; return; }
+
+    play_ogg(intro, false);
+
+    int cur = 0;
+    bool first_buffer = true;
+
+    while (!g_audioShouldStop) {
+        ndspWaveBuf *wb = &g_wavebuf[cur];
+
+        /* Don't touch this buffer's memory until NDSP is done playing it
+         * (skip the wait on the very first fill; both buffers start idle). */
+        if (!first_buffer) {
+            while (wb->status != NDSP_WBUF_DONE && !g_audioShouldStop)
+                svcSleepThread(1000000ULL);
+            if (g_audioShouldStop) break;
+        }
+        first_buffer = false;
+
+        bool eos = false;
+        int frames = decode_frames(&g_ov, wb->data_pcm16, AUDIO_BUF_SAMPLES, g_channels, &eos);
+
+        if (frames < AUDIO_BUF_SAMPLES) {
+            /* Pad the tail with silence so we always hand NDSP a full buffer. */
+            s16 *pad = wb->data_pcm16 + frames * g_channels;
+            memset(pad, 0, (AUDIO_BUF_SAMPLES - frames) * g_channels * sizeof(s16));
+        }
+
+        wb->nsamples = AUDIO_BUF_SAMPLES;
+        wb->status   = NDSP_WBUF_DONE;
+        ndspChnWaveBufAdd(0, wb);
+        cur ^= 1;
+
+        if (eos) {
+            if (!g_loopMode) {
+                unload_ogg(&g_ov);
+                g_ov = {};
+                if (!load_ogg("romfs:/loop.ogg", &g_ov)) { print_status("Audio: loop.ogg missing"); break; }
+                g_loopMode = true;
+                play_ogg(&g_ov, true);
+                first_buffer = true; /* ndspChnReset() inside play_ogg invalidated wavebuf state */
+            } else {
+                ov_raw_seek(&g_ov, 0);
+            }
+        }
+    }
+    g_audioPlaying = false;
+}
+
+static void audio_init() {
+    print_status("Audio: starting...");
+    if (R_FAILED(ndspInit())) { print_status("Audio: ndspInit failed"); return; }
+    print_status("Audio: ndspInit ok");
+
+    if (!load_ogg("romfs:/intro.ogg", &g_ov)) { print_status("Audio: intro.ogg missing"); return; }
+    print_status("Audio: intro.ogg loaded");
+
+    int bs;
+    char test_buf[4096];
+    int test_read = ov_read(&g_ov, test_buf, sizeof(test_buf), &bs);
+    if (test_read <= 0) {
+        print_status("Audio: intro.ogg decode fail (%d)", test_read);
+        unload_ogg(&g_ov);
+        return;
+    }
+    ov_raw_seek(&g_ov, 0);
+
+    vorbis_info *info = ov_info(&g_ov, -1);
+    print_status("Audio: intro.ogg decodes ok (%d ch, %d Hz)",
+                  info ? info->channels : 0, info ? info->rate : 0);
+
+    const size_t wavebuf_bytes = AUDIO_BUF_SAMPLES * AUDIO_MAX_CHANNELS * sizeof(s16);
+    g_wavebuf[0].data_pcm16 = static_cast<s16*>(linearAlloc(wavebuf_bytes));
+    g_wavebuf[1].data_pcm16 = static_cast<s16*>(linearAlloc(wavebuf_bytes));
+    g_wavebuf[0].data_vaddr = reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(g_wavebuf[0].data_pcm16));
+    g_wavebuf[1].data_vaddr = reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(g_wavebuf[1].data_pcm16));
+    if (!g_wavebuf[0].data_pcm16 || !g_wavebuf[1].data_pcm16) { print_status("Audio: linearAlloc fail"); return; }
+    print_status("Audio: buffers allocated");
+
+    memset(g_wavebuf[0].data_pcm16, 0, wavebuf_bytes);
+    memset(g_wavebuf[1].data_pcm16, 0, wavebuf_bytes);
+    g_wavebuf[0].nsamples = g_wavebuf[1].nsamples = AUDIO_BUF_SAMPLES;
+    g_wavebuf[0].looping = g_wavebuf[1].looping = false;
+    g_wavebuf[0].status  = g_wavebuf[1].status  = NDSP_WBUF_DONE;
+
+    g_audioThread = threadCreate(audio_thread_func, &g_ov, 64 * 1024, 0x30, -2, true);
+    if (!g_audioThread) { print_status("Audio: threadCreate fail"); return; }
+    print_status("Audio: thread started");
+    g_audioPlaying = true;
+}
+
+static void audio_exit() {
+    g_audioShouldStop = true;
+    svcSleepThread(100000000ULL);
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Entry point                                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -589,6 +785,8 @@ int main(int argc, char **argv) {
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
     C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
     C2D_Prepare();
+
+    print_status("main: init complete...");
 
     C3D_RenderTarget* top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     C3D_RenderTarget* bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
@@ -626,6 +824,8 @@ int main(int argc, char **argv) {
             goto main_loop;
         }
     }
+
+    audio_init();
 
     socBuffer = static_cast<u32*>(memalign(SOC_ALIGN, SOC_BUFFERSIZE));
     if (!socBuffer || R_FAILED(socInit(socBuffer, SOC_BUFFERSIZE))) {
@@ -714,6 +914,9 @@ main_loop:
         socExit();
         free(socBuffer);
     }
+
+    audio_exit();
+
     if (romfs_mounted) romfsExit();
 
     C2D_Fini();
