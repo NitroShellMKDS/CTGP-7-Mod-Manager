@@ -101,7 +101,7 @@ int main()
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 
 	// Initialize the render target
-	C3D_RenderTarget* target = C3D_RenderTargetCreate(height, width, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	C3D_RenderTarget* target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
 	C3D_RenderTargetSetOutput(target, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 	C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
 
@@ -141,23 +141,25 @@ int main()
 			break; // break in order to return to hbmenu
 			
 		osTickCounterUpdate(&frameTime);
-		io.DeltaTime = osTickCounterRead(&frameTime) * 0.001f;
+		io.DeltaTime = osTickCounterRead(&frameTime) * 1e-9f;
 		osTickCounterStart(&frameTime);
 
 		ImGui::NewFrame();
+#ifdef IMGUI_DEMO
 		ImGui::ShowDemoWindow(NULL);
+#endif
 		ImGui::Render();
 
+		u32 kHeld = hidKeysHeld();
 		hidTouchRead(&touch);
-
-		//printf("px:%d, py:%d\n", touch.px, touch.py);
-		if(touch.px && touch.py)
-		{
+		if (kHeld & KEY_TOUCH) {
 			io.MouseDown[0] = true;
 			io.MousePos = ImVec2(touch.px, touch.py);
+		} else {
+			for (int i = 0; i < IM_ARRAYSIZE(io.MouseDown); ++i)
+				io.MouseDown[i] = false;
+			io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
 		}
-		else
-		io.MouseDown[0] = false;
 
 		// Render the scene
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -170,6 +172,12 @@ int main()
 			imgui_sw::paint_imgui(width, height, sw_options);
 			C2D_Flush();
 		C3D_FrameEnd(0);
+	}
+
+	// Cleanup backend data
+	if (io.BackendRendererUserData) {
+		IM_DELETE(static_cast<imgui_sw::ImGui_ImplC3D_Data*>(io.BackendRendererUserData));
+		io.BackendRendererUserData = nullptr;
 	}
 
 	// Deinitialize the scene

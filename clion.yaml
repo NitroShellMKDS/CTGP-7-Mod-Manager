@@ -1,6 +1,11 @@
 compilers:
-  - description: devkitARM 3DS GCC
+  - description: devkitARM 3DS GCC (C)
     match-sources: ".*\\.c"
     match-language: C
     match-compiler-exe: "(.*/)?arm-none-eabi-gcc(\\.exe)?"
+    include-dirs: $DEVKITARM/arm-none-eabi/include
+  - description: devkitARM 3DS G++ (C++)
+    match-sources: ".*\\.cpp"
+    match-language: C++
+    match-compiler-exe: "(.*/)?arm-none-eabi-g(\\+\\+)(\\.exe)?"
     include-dirs: $DEVKITARM/arm-none-eabi/include

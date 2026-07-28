@@ -12,16 +12,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
-#include <fstream>
-#include <iostream>
 #include <malloc.h>
-#include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+#include <string>
 #include <cerrno>
+#include <atomic>
 #include <cstddef>
-#include <unordered_map>
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_sw.h"
@@ -46,6 +44,7 @@ static constexpr size_t MAX_RESPONSE_SIZE       = 512 * 1024;
 static constexpr int    MAX_FETCH_ATTEMPTS      = 4;
 static constexpr u64    RETRY_BASE_DELAY_NS     = 500000000ULL;
 static constexpr u64    INTER_CATEGORY_DELAY_NS = 200000000ULL;
+static constexpr u64    INTER_PAGE_DELAY_NS     = 200000000ULL;
 static constexpr u64    BATCH_ERROR_SLEEP_NS    = 700000000ULL;
 static constexpr u64    POST_FETCH_DELAY_NS     = 1500000000ULL;
 
@@ -71,18 +70,17 @@ static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[
 /*  Audio (libvorbisidec + NDSP)                                              */
 /* -------------------------------------------------------------------------- */
 
-static constexpr int    AUDIO_BUF_SAMPLES   = 4096;   // frames per NDSP wavebuf
-static constexpr int    AUDIO_MAX_CHANNELS  = 1;
-static constexpr int    AUDIO_VOL           = 0x50;
+static constexpr int    AUDIO_BUF_SAMPLES  = 4096;
+static constexpr int    AUDIO_MAX_CHANNELS = 1;
+static constexpr int    AUDIO_VOL          = 0x50;
 
 static OggVorbis_File g_ov{};
 static bool           g_loopMode = false;
-static volatile bool  g_audioShouldStop = false;
+static std::atomic<bool> g_audioShouldStop{false};
 static int            g_channels = 1;
 static int            g_rate     = 32768;
 static ndspWaveBuf    g_wavebuf[2];
 static Thread         g_audioThread = nullptr;
-static bool           g_audioPlaying = false;
 
 /* -------------------------------------------------------------------------- */
 /*  Color helpers (easy to set individual drawing text / UI colors)            */
@@ -127,8 +125,18 @@ static void print_status(const char* format, ...) {
     char buffer[256];
     va_list args;
     va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), format, args);
+    int written = vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
+
+    if (written < 0) {
+        buffer[0] = '\0';
+    } else if (static_cast<size_t>(written) >= sizeof(buffer)) {
+        size_t len = sizeof(buffer) - 4;
+        buffer[len]     = '.';
+        buffer[len + 1] = '.';
+        buffer[len + 2] = '.';
+        buffer[len + 3] = '\0';
+    }
 
     LightLock_Lock(&status_lock);
     g_statusText = buffer;
@@ -140,35 +148,53 @@ static void print_status(const char* format, ...) {
 /* -------------------------------------------------------------------------- */
 
 static int rmrf(const char *path) {
-    DIR *d = opendir(path);
-    if (!d) return -1;
+    std::vector<std::string> stack;
+    stack.push_back(path);
 
-    struct dirent *entry;
-    while ((entry = readdir(d)) != nullptr) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
+    while (!stack.empty()) {
+        std::string current = std::move(stack.back());
+        stack.pop_back();
 
-        std::string fullpath = std::string(path);
-        if (!fullpath.empty() && fullpath.back() != '/') fullpath += "/";
-        fullpath += entry->d_name;
-
-        struct stat st;
-        if (lstat(fullpath.c_str(), &st) == 0) {
-            if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
-                if (rmrf(fullpath.c_str()) != 0) { closedir(d); return -1; }
-            } else if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
-                if (unlink(fullpath.c_str()) != 0) { closedir(d); return -1; }
-            } else {
-                unlink(fullpath.c_str());
-            }
-        } else if (errno != ENOENT) {
-            closedir(d);
+        DIR *d = opendir(current.c_str());
+        if (!d) {
+            if (errno == ENOENT) continue;
             return -1;
         }
-    }
 
-    closedir(d);
-    return rmdir(path) == 0 ? 0 : -1;
+        struct dirent *entry;
+        bool has_children = false;
+        while ((entry = readdir(d)) != nullptr) {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+
+            std::string fullpath = current;
+            if (!fullpath.empty() && fullpath.back() != '/') fullpath += "/";
+            fullpath += entry->d_name;
+
+            struct stat st;
+            if (lstat(fullpath.c_str(), &st) == 0) {
+                if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+                    stack.push_back(current);
+                    stack.push_back(fullpath);
+                    has_children = true;
+                    break;
+                } else if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+                    if (unlink(fullpath.c_str()) != 0) { closedir(d); return -1; }
+                } else {
+                    unlink(fullpath.c_str());
+                }
+            } else if (errno != ENOENT) {
+                closedir(d);
+                return -1;
+            }
+        }
+        closedir(d);
+
+        if (!has_children) {
+            if (rmdir(current.c_str()) != 0 && errno != ENOENT) return -1;
+        }
+    }
+    return 0;
 }
 
 static bool mkdir_p(const char *path) {
@@ -207,10 +233,11 @@ static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *use
     size_t total = size * nmemb;
     auto *result = static_cast<std::string*>(userp);
 
-    if (total > 0 && result->size() + total > MAX_RESPONSE_SIZE) {
-        return 0;  /* Signal unrecoverable error to libcurl */
+    if (total > 0 && result->size() > MAX_RESPONSE_SIZE - total) {
+        return CURL_WRITEFUNC_ERROR;
     }
 
+    if (total == 0) return 0;
     result->append(static_cast<char*>(contents), total);
     return total;
 }
@@ -243,6 +270,8 @@ static FetchResult curl_get(CURL *curl, const std::string& url) {
     if (res == CURLE_OK) {
         if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.response_code) == CURLE_OK) {
             result.success = (result.response_code >= 200 && result.response_code < 300);
+        } else {
+            print_status("Warning: curl_easy_getinfo failed for %s", url.c_str());
         }
     } else {
         print_status("cURL Error: %s", curl_easy_strerror(res));
@@ -332,14 +361,23 @@ static bool write_mods_json(const std::string& filename, const std::vector<ModDa
         json_object *jobj = json_object_new_object();
         if (!jobj) { json_object_put(jarray); return false; }
 
-        json_object_object_add(jobj, "Id",             json_object_new_int(mod.Id));
-        json_object_object_add(jobj, "Name",           json_object_new_string(mod.Name.c_str()));
-        json_object_object_add(jobj, "Author",         json_object_new_string(mod.Author.c_str()));
-        json_object_object_add(jobj, "ThumbnailUrl",   json_object_new_string(mod.ThumbnailUrl.c_str()));
-        json_object_object_add(jobj, "LatestFileUrl",  json_object_new_string(mod.LatestFileUrl.c_str()));
-        json_object_object_add(jobj, "LatestFileDate", json_object_new_int64(mod.LatestFileDate));
-        json_object_object_add(jobj, "LatestFileName", json_object_new_string(mod.LatestFileName.c_str()));
+        auto add_field = [](json_object* obj, const char* key, json_object* val) -> bool {
+            if (json_object_object_add(obj, key, val) != 0) {
+                json_object_put(val);
+                return false;
+            }
+            return true;
+        };
 
+        bool ok = add_field(jobj, "Id",             json_object_new_int(mod.Id))
+               && add_field(jobj, "Name",           json_object_new_string(mod.Name.c_str()))
+               && add_field(jobj, "Author",         json_object_new_string(mod.Author.c_str()))
+               && add_field(jobj, "ThumbnailUrl",   json_object_new_string(mod.ThumbnailUrl.c_str()))
+               && add_field(jobj, "LatestFileUrl",  json_object_new_string(mod.LatestFileUrl.c_str()))
+               && add_field(jobj, "LatestFileDate", json_object_new_int64(mod.LatestFileDate))
+               && add_field(jobj, "LatestFileName", json_object_new_string(mod.LatestFileName.c_str()));
+
+        if (!ok) { json_object_put(jobj); json_object_put(jarray); return false; } /* json_object_put cascades to children */
         json_object_array_add(jarray, jobj);
     }
 
@@ -353,78 +391,89 @@ static bool write_mods_json(const std::string& filename, const std::vector<ModDa
 /* -------------------------------------------------------------------------- */
 
 static void fetch_category(CURL *curl, int cat_id, std::vector<ModData>& out_mods) {
-    std::string url = std::string(API_V10_INDEX)
-        + "?_nPage=1&_nPerpage=50&_aFilters[Generic_Category]="
-        + std::to_string(cat_id);
+    constexpr int PER_PAGE = 50;
+    for (int page = 1; ; ++page) {
+        std::string url = std::string(API_V10_INDEX)
+            + "?_nPage=" + std::to_string(page)
+            + "&_nPerpage=" + std::to_string(PER_PAGE)
+            + "&_aFilters[Generic_Category]=" + std::to_string(cat_id);
 
-    FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
-    if (!result.success) {
-        print_status("Category %d failed after retries, skipping", cat_id);
-        svcSleepThread(700000000ULL);
-        return;
-    }
-
-    json_object *root = json_tokener_parse(result.data.c_str());
-    if (!root) return;
-
-    json_object *records;
-    if (!json_object_object_get_ex(root, "_aRecords", &records)
-        || json_object_get_type(records) != json_type_array) {
-        json_object_put(root);
-        return;
-    }
-
-    int len = json_object_array_length(records);
-    if (len <= 0) { json_object_put(root); return; }
-
-    for (int i = 0; i < len; i++) {
-        json_object *record = json_object_array_get_idx(records, i);
-        if (!record || json_object_get_type(record) != json_type_object) continue;
-
-        int id = get_json_int(record, "_idRow");
-        if (id == 0) continue;
-
-        ModData mod;
-        mod.Id = id;
-
-        const char *sName = get_json_string(record, "_sName");
-        if (sName) mod.Name = sName;
-
-        mod.Author = "Unknown";
-        json_object *submitter;
-        if (json_object_object_get_ex(record, "_aSubmitter", &submitter)
-            && json_object_get_type(submitter) == json_type_object) {
-            const char *subName = get_json_string(submitter, "_sName");
-            if (subName) mod.Author = subName;
+        FetchResult result = curl_get_retry(curl, url, MAX_FETCH_ATTEMPTS);
+        if (!result.success) {
+            print_status("Category %d page %d failed after retries, stopping pagination", cat_id, page);
+            svcSleepThread(700000000ULL);
+            break;
         }
 
-        json_object *preview;
-        if (json_object_object_get_ex(record, "_aPreviewMedia", &preview)
-            && json_object_get_type(preview) == json_type_object) {
-            json_object *images;
-            if (json_object_object_get_ex(preview, "_aImages", &images)
-                && json_object_get_type(images) == json_type_array) {
-                int img_count = json_object_array_length(images);
-                if (img_count > 0) {
-                    json_object *img = json_object_array_get_idx(images, 0);
-                    if (img && json_object_get_type(img) == json_type_object) {
-                        const char *base_url = get_json_string(img, "_sBaseUrl");
-                        const char *file220  = get_json_string(img, "_sFile220");
-                        const char *file     = get_json_string(img, "_sFile");
+        json_object *root = json_tokener_parse(result.data.c_str());
+        if (!root) {
+            print_status("JSON parse error for category %d page %d, skipping page", cat_id, page);
+            svcSleepThread(INTER_PAGE_DELAY_NS);
+            continue;   /* skip this page, try the next one */
+        }
 
-                        if (base_url && file220 && base_url[0] && file220[0]) {
-                            mod.ThumbnailUrl = std::string(base_url) + "/" + file220;
-                        } else if (base_url && file && base_url[0] && file[0]) {
-                            mod.ThumbnailUrl = std::string(base_url) + "/" + file;
+        json_object *records;
+        if (!json_object_object_get_ex(root, "_aRecords", &records)
+            || json_object_get_type(records) != json_type_array) {
+            json_object_put(root);
+            break;
+        }
+
+        int len = json_object_array_length(records);
+        if (len <= 0) { json_object_put(root); break; }
+
+        for (int i = 0; i < len; i++) {
+            json_object *record = json_object_array_get_idx(records, i);
+            if (!record || json_object_get_type(record) != json_type_object) continue;
+
+            int id = get_json_int(record, "_idRow");
+            if (id == 0) continue;
+
+            ModData mod;
+            mod.Id = id;
+
+            const char *sName = get_json_string(record, "_sName");
+            if (sName) mod.Name = sName;
+
+            mod.Author = "Unknown";
+            json_object *submitter;
+            if (json_object_object_get_ex(record, "_aSubmitter", &submitter)
+                && json_object_get_type(submitter) == json_type_object) {
+                const char *subName = get_json_string(submitter, "_sName");
+                if (subName) mod.Author = subName;
+            }
+
+            json_object *preview;
+            if (json_object_object_get_ex(record, "_aPreviewMedia", &preview)
+                && json_object_get_type(preview) == json_type_object) {
+                json_object *images;
+                if (json_object_object_get_ex(preview, "_aImages", &images)
+                    && json_object_get_type(images) == json_type_array) {
+                    int img_count = json_object_array_length(images);
+                    if (img_count > 0) {
+                        json_object *img = json_object_array_get_idx(images, 0);
+                        if (img && json_object_get_type(img) == json_type_object) {
+                            const char *base_url = get_json_string(img, "_sBaseUrl");
+                            const char *file220  = get_json_string(img, "_sFile220");
+                            const char *file     = get_json_string(img, "_sFile");
+
+                            if (base_url && file220 && base_url[0] && file220[0]) {
+                                mod.ThumbnailUrl = std::string(base_url) + "/" + file220;
+                            } else if (base_url && file && base_url[0] && file[0]) {
+                                mod.ThumbnailUrl = std::string(base_url) + "/" + file;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        out_mods.push_back(std::move(mod));
+            out_mods.push_back(std::move(mod));
+        }
+        json_object_put(root);
+
+        if (len < PER_PAGE) break;
+        svcSleepThread(INTER_CATEGORY_DELAY_NS);
     }
-    json_object_put(root);
 }
 
 static void deduplicate_mods(std::vector<ModData>& mods) {
@@ -456,7 +505,7 @@ static void parse_latest_file(json_object *raw_item, ModData& mod) {
                 max_ts = ts;
                 mod.LatestFileUrl  = "https://gamebanana.com/dl/" + std::to_string(fid);
                 mod.LatestFileName = sfile;
-                mod.LatestFileDate = max_ts;
+                mod.LatestFileDate = ts;
             }
         }
     };
@@ -540,7 +589,11 @@ static void fetch_thread_func(void* arg) {
 
     if (!curl) {
         print_status("curl_easy_init failed!");
-        goto exit_thread;
+        LightLock_Lock(&status_lock);
+        g_fetchSuccess = false;
+        g_fetchDone = true;
+        LightLock_Unlock(&status_lock);
+        return;
     }
 
     rmrf(CACHE_DIR);
@@ -571,10 +624,14 @@ static void fetch_thread_func(void* arg) {
             }
 
             std::sort(all_mods.begin(), all_mods.end(), [](const ModData& a, const ModData& b) { return a.Name < b.Name; });
-            write_mods_json(BY_NAME_FILE, all_mods);
+            if (!write_mods_json(BY_NAME_FILE, all_mods)) {
+                print_status("Warning: failed to write byname.json");
+            }
 
             std::sort(all_mods.begin(), all_mods.end(), [](const ModData& a, const ModData& b) { return a.LatestFileDate > b.LatestFileDate; });
-            write_mods_json(BY_UPDATED_FILE, all_mods);
+            if (!write_mods_json(BY_UPDATED_FILE, all_mods)) {
+                print_status("Warning: failed to write byupdated.json");
+            }
 
             fetch_succeeded = (enriched > 0);
             print_status("Done! Enriched %zu/%zu mods.", enriched, all_mods.size());
@@ -588,7 +645,6 @@ static void fetch_thread_func(void* arg) {
 
     curl_easy_cleanup(curl);
 
-exit_thread:
     LightLock_Lock(&status_lock);
     g_fetchSuccess = fetch_succeeded;
     g_fetchDone = true;
@@ -604,7 +660,12 @@ static size_t ogg_read_cb(void *ptr, size_t size, size_t nmemb, void *datasource
 }
 
 static int ogg_seek_cb(void *datasource, ogg_int64_t offset, int whence) {
+#if defined(__3DS__) && defined(fseeko)
+    return fseeko(static_cast<FILE*>(datasource), static_cast<off_t>(offset), whence) ? -1 : 0;
+#else
+    if (offset < INT_MIN || offset > INT_MAX) return -1;
     return fseek(static_cast<FILE*>(datasource), static_cast<long>(offset), whence) ? -1 : 0;
+#endif
 }
 
 static int ogg_close_cb(void *datasource) {
@@ -662,12 +723,21 @@ static int decode_frames(OggVorbis_File *ovf, s16 *dst, int frame_capacity, int 
     const int bytes_capacity = frame_capacity * channels * (int)sizeof(s16);
     int bytes_done = 0;
     char *out = reinterpret_cast<char*>(dst);
+    constexpr int MAX_CONSECUTIVE_ERRORS = 64;
+    int consecutive_errors = 0;
 
     while (bytes_done < bytes_capacity) {
         int bitstream = 0;
         long br = ov_read(ovf, out + bytes_done, bytes_capacity - bytes_done, &bitstream);
         if (br == 0) { *eos = true; break; }               /* clean EOF */
-        if (br < 0) continue;                               /* recoverable stream error, retry */
+        if (br < 0) {
+            if (++consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
+                *eos = true; /* treat persistent stream error as EOS to prevent infinite spin */
+                break;
+            }
+            continue;                                       /* recoverable stream error, retry */
+        }
+        consecutive_errors = 0;
         bytes_done += static_cast<int>(br);
     }
     return bytes_done / (channels * (int)sizeof(s16));
@@ -675,7 +745,7 @@ static int decode_frames(OggVorbis_File *ovf, s16 *dst, int frame_capacity, int 
 
 static void audio_thread_func(void *arg) {
     OggVorbis_File *intro = static_cast<OggVorbis_File*>(arg);
-    if (!intro) { g_audioPlaying = false; return; }
+    if (!intro) return;
 
     play_ogg(intro, false);
 
@@ -721,7 +791,6 @@ static void audio_thread_func(void *arg) {
             }
         }
     }
-    g_audioPlaying = false;
 }
 
 static void audio_init() {
@@ -749,9 +818,18 @@ static void audio_init() {
     const size_t wavebuf_bytes = AUDIO_BUF_SAMPLES * AUDIO_MAX_CHANNELS * sizeof(s16);
     g_wavebuf[0].data_pcm16 = static_cast<s16*>(linearAlloc(wavebuf_bytes));
     g_wavebuf[1].data_pcm16 = static_cast<s16*>(linearAlloc(wavebuf_bytes));
-    g_wavebuf[0].data_vaddr = reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(g_wavebuf[0].data_pcm16));
-    g_wavebuf[1].data_vaddr = reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(g_wavebuf[1].data_pcm16));
-    if (!g_wavebuf[0].data_pcm16 || !g_wavebuf[1].data_pcm16) { print_status("Audio: linearAlloc fail"); return; }
+    // FIX: Proper cleanup on partial allocation failure
+    if (!g_wavebuf[0].data_pcm16 || !g_wavebuf[1].data_pcm16) {
+        print_status("Audio: linearAlloc fail");
+        if (g_wavebuf[0].data_pcm16) linearFree(g_wavebuf[0].data_pcm16);
+        if (g_wavebuf[1].data_pcm16) linearFree(g_wavebuf[1].data_pcm16);
+        g_wavebuf[0].data_pcm16 = g_wavebuf[1].data_pcm16 = nullptr;
+        return;
+    }
+
+    // FIX: Remove double-cast; implicit conversion is sufficient
+    g_wavebuf[0].data_vaddr = g_wavebuf[0].data_pcm16;
+    g_wavebuf[1].data_vaddr = g_wavebuf[1].data_pcm16;
     print_status("Audio: buffers allocated");
 
     memset(g_wavebuf[0].data_pcm16, 0, wavebuf_bytes);
@@ -760,15 +838,18 @@ static void audio_init() {
     g_wavebuf[0].looping = g_wavebuf[1].looping = false;
     g_wavebuf[0].status  = g_wavebuf[1].status  = NDSP_WBUF_DONE;
 
-    g_audioThread = threadCreate(audio_thread_func, &g_ov, 64 * 1024, 0x30, -2, true);
+    g_audioThread = threadCreate(audio_thread_func, &g_ov, 128 * 1024, 0x30, -2, true);
     if (!g_audioThread) { print_status("Audio: threadCreate fail"); return; }
     print_status("Audio: thread started");
-    g_audioPlaying = true;
 }
 
-static void audio_exit() {
+static void audio_shutdown() {
     g_audioShouldStop = true;
-    svcSleepThread(100000000ULL);
+    if (g_audioThread) {
+        threadJoin(g_audioThread, U64_MAX);
+        threadFree(g_audioThread);
+        g_audioThread = nullptr;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -788,71 +869,112 @@ int main(int argc, char **argv) {
 
     print_status("main: init complete...");
 
+    bool fatal_error = false;
+    ImGuiIO* io = nullptr;
+    TickCounter frameTime;
+    touchPosition touch;
+    u32 clrClear = 0;
+    imgui_sw::SwOptions sw_options;
+    Thread fetchThread = nullptr;
+    bool romfs_mounted = false;
+
     C3D_RenderTarget* top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     C3D_RenderTarget* bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
+    if (!top || !bottom) {
+        print_status("Fatal: failed to create render targets");
+        fatal_error = true;
+    } else {
+        ImGui::CreateContext();
+        io = &ImGui::GetIO();
+        io->DisplaySize = ImVec2(320.0f, 240.0f);
+        imgui_sw::bind_imgui_painting();
+        imgui_sw::make_style_fast();
 
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(320.0f, 240.0f);
-    imgui_sw::bind_imgui_painting();
-    imgui_sw::SwOptions sw_options;
-    imgui_sw::make_style_fast();
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.Colors[ImGuiCol_WindowBg] = ImVec4(0x15 / 255.0f, 0x1D / 255.0f, 0x23 / 255.0f, 1.0f);
+        style.WindowRounding = 0.0f;
+        style.WindowPadding = ImVec2(0.0f, 0.0f);
+        style.WindowBorderSize = 0.0f;
 
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0x15 / 255.0f, 0x1D / 255.0f, 0x23 / 255.0f, 1.0f);
-    style.WindowRounding = 0.0f;
-    style.WindowPadding = ImVec2(0.0f, 0.0f);
-    style.WindowBorderSize = 0.0f;
+        io->DeltaTime = 1.0f / 60.0f;
+        osTickCounterStart(&frameTime);
+        clrClear = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
 
-    // Screen color: #151D23 | Text color: #ABA022
-    u32 clrClear = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
+        romfs_mounted = R_SUCCEEDED(romfsInit());
+        if (!romfs_mounted) {
+            print_status("romfsInit failed - no CA bundle!");
+            fatal_error = true;
+        } else {
+            struct stat sb;
+            if (stat("romfs:/cacert.pem", &sb) != 0) {
+                print_status("Fatal: CA bundle missing from ROMFS");
+                fatal_error = true;
+            } else {
+                audio_init();
 
-    Thread fetchThread = nullptr;
-
-    bool romfs_mounted = R_SUCCEEDED(romfsInit());
-    if (!romfs_mounted) {
-        print_status("romfsInit failed - no CA bundle!");
-        g_fetchDone = true;
-        goto main_loop;
-    }
-
-    {
-        struct stat sb;
-        if (stat("romfs:/cacert.pem", &sb) != 0) {
-            print_status("Fatal: CA bundle missing from ROMFS");
-            g_fetchDone = true;
-            goto main_loop;
+                socBuffer = static_cast<u32*>(memalign(SOC_ALIGN, SOC_BUFFERSIZE));
+                if (!socBuffer || R_FAILED(socInit(socBuffer, SOC_BUFFERSIZE))) {
+                    print_status("socInit failed!");
+                    fatal_error = true;
+                } else {
+                    if (R_FAILED(sslcInit(0))) {
+                        print_status("sslcInit failed!");
+                        fatal_error = true;
+                    } else {
+                        if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
+                            print_status("curl_global_init failed!");
+                            fatal_error = true;
+                        } else {
+                            fetchThread = threadCreate(fetch_thread_func, NULL, 128 * 1024, 0x3F, -2, true);
+                            if (!fetchThread) {
+                                print_status("Fatal: failed to create fetch thread");
+                                fatal_error = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    audio_init();
-
-    socBuffer = static_cast<u32*>(memalign(SOC_ALIGN, SOC_BUFFERSIZE));
-    if (!socBuffer || R_FAILED(socInit(socBuffer, SOC_BUFFERSIZE))) {
-        print_status("socInit failed!");
+    if (fatal_error) {
         g_fetchDone = true;
-        goto main_loop;
+        if (fetchThread) {
+            threadJoin(fetchThread, U64_MAX);
+            threadFree(fetchThread);
+        }
+        audio_shutdown();
+        curl_global_cleanup();
+        sslcExit();
+        if (socBuffer) {
+            socExit();
+            free(socBuffer);
+        }
+        if (romfs_mounted) romfsExit();
+        C2D_Fini();
+        C3D_Fini();
+        gfxExit();
+        return 1;
     }
 
-    if (R_FAILED(sslcInit(0))) {
-        print_status("sslcInit failed!");
-        g_fetchDone = true;
-        goto main_loop;
-    }
-
-    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
-        print_status("curl_global_init failed!");
-        g_fetchDone = true;
-        goto main_loop;
-    }
-
-    // Launch background thread so UI doesn't freeze
-    fetchThread = threadCreate(fetch_thread_func, NULL, 64 * 1024, 0x3F, -2, true);
-
-main_loop:
     while (aptMainLoop()) {
         hidScanInput();
         u32 kDown = hidKeysDown();
+
+        osTickCounterUpdate(&frameTime);
+        io->DeltaTime = osTickCounterRead(&frameTime) * 1e-9f;
+        osTickCounterStart(&frameTime);
+
+        u32 kHeld = hidKeysHeld();
+        hidTouchRead(&touch);
+        if (kHeld & KEY_TOUCH) {
+            io->MouseDown[0] = true;
+            io->MousePos = ImVec2(static_cast<float>(touch.px), static_cast<float>(touch.py));
+        } else {
+            for (int i = 0; i < IM_ARRAYSIZE(io->MouseDown); ++i)
+                io->MouseDown[i] = false;
+            io->MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+        }
 
         LightLock_Lock(&status_lock);
         bool done = g_fetchDone;
@@ -915,7 +1037,7 @@ main_loop:
         free(socBuffer);
     }
 
-    audio_exit();
+    audio_shutdown();
 
     if (romfs_mounted) romfsExit();
 
