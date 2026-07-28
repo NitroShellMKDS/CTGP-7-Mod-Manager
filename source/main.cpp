@@ -65,8 +65,18 @@ static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[
 #define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
 
 /* -------------------------------------------------------------------------- */
-/*  Data Structures & Globals for Rendering                                   */
+/*  Color helpers (easy to set individual drawing text / UI colors)            */
 /* -------------------------------------------------------------------------- */
+
+static ImVec4 MakeTextColor(u8 r, u8 g, u8 b, u8 a = 255)
+{
+    return ImVec4(
+        static_cast<float>(r) / 255.0f,
+        static_cast<float>(g) / 255.0f,
+        static_cast<float>(b) / 255.0f,
+        static_cast<float>(a) / 255.0f
+    );
+}
 
 struct ModData {
     int         Id             = 0;
@@ -596,9 +606,8 @@ int main(int argc, char **argv) {
     style.WindowPadding = ImVec2(0.0f, 0.0f);
     style.WindowBorderSize = 0.0f;
 
-    // Screen color: #151d23 | Text color: #ABA022
+    // Screen color: #151D23 | Text color: #ABA022
     u32 clrClear = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
-    u32 clrText = C2D_Color32(0xAB, 0xA0, 0x22, 0xFF);
 
     Thread fetchThread = nullptr;
 
@@ -677,12 +686,7 @@ main_loop:
             float x = (320.0f - textSize.x) / 2.0f;
             float y = (240.0f - textSize.y) / 2.0f;
 
-            ImVec4 textColor = ImVec4(
-                ((clrText >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
-                ((clrText >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
-                ((clrText >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
-                ((clrText >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f
-            );
+            const ImVec4 textColor = MakeTextColor(0xAB, 0xA0, 0x22, 0xFF);
 
             ImGui::SetCursorPos(ImVec2(x, y));
             ImGui::TextColored(textColor, "%s", currentText.c_str());
@@ -692,6 +696,7 @@ main_loop:
         ImGui::Render();
 
         C2D_Prepare();
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
         imgui_sw::paint_imgui(320, 240, sw_options);
         C2D_Flush();
 

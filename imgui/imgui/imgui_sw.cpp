@@ -14,6 +14,57 @@
 
 #include <memory>
 
+extern "C" {
+	struct C2Di_Vertex {
+		float pos[3];
+		float texcoord[2];
+		float ptcoord[2];
+		u32 color;
+	};
+
+	typedef struct
+	{
+		DVLB_s* shader;
+		shaderProgram_s program;
+		C3D_AttrInfo attrInfo;
+		C3D_BufInfo bufInfo;
+		C3D_ProcTex ptBlend;
+		C3D_ProcTex ptCircle;
+		C3D_ProcTexLut ptBlendLut;
+		C3D_ProcTexLut ptCircleLut;
+		u32 sceneW, sceneH;
+		C2Di_Vertex* vtxBuf;
+		u16* idxBuf;
+		size_t vtxBufSize;
+		size_t vtxBufPos;
+		size_t idxBufSize;
+		size_t idxBufPos;
+		size_t idxBufLastPos;
+		u32 flags;
+		C3D_Mtx projMtx;
+		C3D_Mtx mdlvMtx;
+		C3D_Tex* curTex;
+		u32 fadeClr;
+	} C2Di_Context;
+
+	static inline C2Di_Context* C2Di_GetContext(void) {
+		extern C2Di_Context __C2Di_Context;
+		return &__C2Di_Context;
+	}
+
+	enum {
+		C2DiF_Mode_Shift      = 8,
+		C2DiF_Mode_Mask       = 0xf << C2DiF_Mode_Shift,
+		C2DiF_Mode_Solid      = 0   << C2DiF_Mode_Shift,
+		C2DiF_Mode_Circle     = 1   << C2DiF_Mode_Shift,
+		C2DiF_Mode_Text       = 2   << C2DiF_Mode_Shift,
+		C2DiF_Mode_ImageSolid = 3   << C2DiF_Mode_Shift,
+		C2DiF_Mode_ImageMult  = 4   << C2DiF_Mode_Shift,
+		C2DiF_TintMode_Shift  = 16,
+		C2DiF_TintMode_Mask   = 0xf << C2DiF_TintMode_Shift,
+	};
+}
+
 namespace imgui_sw {
 	namespace {
 
@@ -258,19 +309,25 @@ namespace imgui_sw {
 			float C2D_uv_right = C2D_uv_left + ((pixelWidth + 0.5f) / texture->width);
 			float C2D_uv_bot = C2D_uv_top - ((pixelHeight + 0.5f) / texture->height);
 			
-			Tex3DS_SubTexture subt3x = { pixelWidth, pixelHeight, C2D_uv_left, C2D_uv_top, C2D_uv_right, C2D_uv_bot };
-			C2D_Image image = (C2D_Image){ texture, &subt3x };
+		Tex3DS_SubTexture subt3x = { pixelWidth, pixelHeight, C2D_uv_left, C2D_uv_top, C2D_uv_right, C2D_uv_bot };
+		C2D_Image image = (C2D_Image){ texture, &subt3x };
 
-			const C2D_ImageTint tint = { {
-				{v0.col, 1.0f},
-				{v0.col, 1.0f},
-				{v0.col, 1.0f},
-				{v0.col, 1.0f}
-			} };
-			C2D_DrawImageAt(image, min_x_i, min_y_i, 0.0f, &tint, 1.0f, 1.0f);
-			// C2D_DrawRectangle(min_x_i, min_y_i, 0.0f, max_x_i - min_x_i, max_y_i - min_y_i,  v0.col, v0.col, v0.col, v0.col);
-			s_imageCount++;
-		}
+		C2Di_Context* ctx = C2Di_GetContext();
+		u32 saved_tint_mode = ctx->flags & C2DiF_TintMode_Mask;
+		ctx->flags = (ctx->flags &~ C2DiF_TintMode_Mask) | (C2DiF_Mode_Text << (C2DiF_TintMode_Shift - C2DiF_Mode_Shift));
+
+		const C2D_ImageTint tint = { {
+			{v0.col, 1.0f},
+			{v0.col, 1.0f},
+			{v0.col, 1.0f},
+			{v0.col, 1.0f}
+		} };
+		C2D_DrawImageAt(image, min_x_i, min_y_i, 0.0f, &tint, 1.0f, 1.0f);
+
+		ctx->flags = (ctx->flags &~ C2DiF_TintMode_Mask) | saved_tint_mode;
+		// C2D_DrawRectangle(min_x_i, min_y_i, 0.0f, max_x_i - min_x_i, max_y_i - min_y_i,  v0.col, v0.col, v0.col, v0.col);
+		s_imageCount++;
+	}
 
 		void paint_uniform_triangle(
 			const PaintTarget& target,
