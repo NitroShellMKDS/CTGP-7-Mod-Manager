@@ -20,82 +20,65 @@ MAKEROM 	?= makerom
 BANNERTOOL 	?= bannertool
 endif
 
-RSF_FILE	:=	app/build-cia.rsf
-BNR_IMAGE	:=	app/banner.cgfx
-BNR_AUDIO	:=	app/audio.wav
-ICON		:=	app/icon.png
+RSF_FILE	:= app/build-cia.rsf
+BNR_IMAGE	:= app/banner.cgfx
+BNR_AUDIO	:= app/audio.wav
+ICON		:= app/icon.png
 
-APP_TITLE		:=	CTGP-7 Mod Manager
-APP_AUTHOR		:=	NitroShell and Bonkmaykr
+APP_TITLE	:= CTGP-7 Mod Manager
+APP_AUTHOR	:= NitroShell and Bonkmaykr
 
-TARGET		:=	CTGP-7-Mod-Manager
-BUILD		:=	build
-SOURCES		:=	source
-INCLUDES	:=	include
-ROMFS		:=	romfs
+TARGET		:= CTGP-7-Mod-Manager
+BUILD		:= build
+SOURCES		:= source
+INCLUDES	:= include
+ROMFS		:= romfs
 
 #---------------------------------------------------------------------------------
-# options for code generation
+# Options for code generation
 #---------------------------------------------------------------------------------
-# -mtp=soft is required by libctru on 3DS despite -mfloat-abi=hard
-ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+ARCH	:= -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+CFLAGS	:= -g -Wall -Wextra -Os -mword-relocations \
+		   -ffunction-sections -fdata-sections \
+		   $(ARCH)
 
-# Switched to -Os for space optimization on I-cache constrained hardware.
-# Added -fdata-sections to pair with -ffunction-sections.
-CFLAGS	:=	-g -Wall -Wextra -Os -mword-relocations \
-			-ffunction-sections -fdata-sections \
-			$(ARCH)
+CFLAGS		+= $(INCLUDE) -D__3DS__
+CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++14 -Wno-psabi
+ASFLAGS		:= -g $(ARCH)
+LDFLAGS		:= -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
 
-CFLAGS	+=	$(INCLUDE) -D__3DS__
-
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++14
-
-ASFLAGS	:=	-g $(ARCH)
-
-# Added -Wl,--gc-sections to garbage-collect unused initialized data
-LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
-
-# Dependency order: libcurl -> mbedtls -> libctru (soc/sslc)
-LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -lz -lctru -lm
-
+LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -lz -lcitro2d -lcitro3d -lctru -lm
 LIBDIRS	:= $(PORTLIBS) $(CTRULIB)
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 
-export OUTPUT	:=	$(CURDIR)/$(TARGET)
-export TOPDIR	:=	$(CURDIR)
+export OUTPUT	:= $(CURDIR)/$(TARGET)
+export TOPDIR	:= $(CURDIR)
+export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
+export DEPSDIR	:= $(CURDIR)/$(BUILD)
 
-export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
-
-export DEPSDIR	:=	$(CURDIR)/$(BUILD)
-
-CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
-PICAFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.v.pica)))
-SHLISTFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.shlist)))
+CFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+SFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+PICAFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.v.pica)))
+SHLISTFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.shlist)))
 
 ifeq ($(strip $(CPPFILES)),)
-	export LD	:=	$(CC)
+	export LD := $(CC)
 else
-	export LD	:=	$(CXX)
+	export LD := $(CXX)
 endif
 
-export OFILES_SOURCES 	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+export OFILES_SOURCES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+export OFILES_BIN     := $(PICAFILES:.v.pica=.shbin.o) $(SHLISTFILES:.shlist=.shbin.o)
+export OFILES         := $(OFILES_BIN) $(OFILES_SOURCES)
+export HFILES         := $(PICAFILES:.v.pica=_shbin.h) $(SHLISTFILES:.shlist=_shbin.h)
 
-export OFILES_BIN	:=	$(PICAFILES:.v.pica=.shbin.o) $(SHLISTFILES:.shlist=.shbin.o)
-
-export OFILES := $(OFILES_BIN) $(OFILES_SOURCES)
-
-export HFILES	:=	$(PICAFILES:.v.pica=_shbin.h) $(SHLISTFILES:.shlist=_shbin.h)
-
-export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-			$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-			-I$(CURDIR)/$(BUILD)
-
-export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
-
-export _3DSXDEPS	:=	$(if $(NO_SMDH),,$(OUTPUT).smdh)
+export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+		           $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+		           -I$(CURDIR)/$(BUILD)
+export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export _3DSXDEPS := $(if $(NO_SMDH),,$(OUTPUT).smdh)
 
 ifeq ($(strip $(ICON)),)
 	icons := $(wildcard *.png)
@@ -131,7 +114,6 @@ $(DEPSDIR):
 	@mkdir -p $@
 endif
 
-# Ensure $(DEPSDIR) is thoroughly cleaned
 clean:
 	@echo clean ...
 	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(OUTPUT).cia $(DEPSDIR)
@@ -143,23 +125,21 @@ else
 
 all: $(OUTPUT).3dsx $(OUTPUT).cia
 
-$(OUTPUT).3dsx	:	$(OUTPUT).elf $(_3DSXDEPS)
+$(OUTPUT).3dsx	: $(OUTPUT).elf $(_3DSXDEPS)
 $(OFILES_SOURCES) : $(HFILES)
-$(OUTPUT).elf	:	$(OFILES)
+$(OUTPUT).elf	: $(OFILES)
 
-$(OUTPUT).cia	:	$(OUTPUT).elf $(OUTPUT).smdh
+$(OUTPUT).cia	: $(OUTPUT).elf $(OUTPUT).smdh
 	@$(BANNERTOOL) makebanner -ci "../app/banner.cgfx" -a "../app/audio.wav" -o "../app/banner.bin"
-
 	@$(BANNERTOOL) makesmdh -i "../app/icon.png" -s "$(TARGET)" -l "$(APP_TITLE)" -p "$(APP_AUTHOR)" -o "../app/icon.bin" \
 		--flags visible,ratingrequired --cero 153 --esrb 153 --usk 153 --pegigen 153 --pegiptr 153 --pegibbfc 153 --cob 153 --grb 153 --cgsrr 153
-
 	@$(MAKEROM) -f cia -target t -exefslogo -o "$(OUTPUT).cia" -elf "$(OUTPUT).elf" -rsf "../app/build-cia.rsf" -banner "../app/banner.bin" -icon "../app/icon.bin" -DAPP_ROMFS=".."
 
-%.bin.o	%_bin.h :	%.bin
+%.bin.o	%_bin.h : %.bin
 	@echo $(notdir $<)
 	@$(bin2o)
 
-.PRECIOUS	:	%.shbin
+.PRECIOUS: %.shbin
 
 %.shbin.o %_shbin.h : %.shbin
 	$(SILENTMSG) $(notdir $<)
