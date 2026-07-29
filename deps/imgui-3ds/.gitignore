@@ -1,0 +1,9 @@
+
+*.elf
+*.nacp
+*.nro
+*.nso
+*.pfs0
+/build
+imgui-3ds.3dsx
+imgui-3ds.smdh
