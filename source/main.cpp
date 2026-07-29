@@ -1,6 +1,9 @@
 #include <3ds.h>
 #include <citro2d.h>
 #include <citro3d.h>
+#include <imgui.h>
+#include <imgui_sw.h>
+#include <imgui-3ds.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 
@@ -64,6 +67,11 @@ static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[
 #define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
 #define LOG_FILE        APP_DIR   "output.log"
 
+#define DISPLAY_TRANSFER_FLAGS \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
+    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
+    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+
 /* -------------------------------------------------------------------------- */
 /*  Data Structures & Globals for Rendering                                   */
 /* -------------------------------------------------------------------------- */
@@ -89,6 +97,7 @@ static std::string g_statusText = "Initializing...";
 static bool g_fetchDone = false;
 static bool g_fetchSuccess = false;
 static FILE* g_logFile = nullptr;
+static bool g_sortByName = false;
 
 // wraps ModData and holds a texture loaded from ThumbnailUrl
 struct UIModData {
@@ -580,6 +589,14 @@ exit_thread:
     LightLock_Unlock(&status_lock);
 }
 
+void begin_install() {
+    // TODO
+}
+
+void begin_uninstall() {
+    // TODO
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Entry point                                                               */
 /* -------------------------------------------------------------------------- */
@@ -594,11 +611,29 @@ int main(int argc, char **argv) {
 
     gfxInitDefault();
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+	C3D_RenderTarget* target = C3D_RenderTargetCreate(320, 240, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	C3D_RenderTargetSetOutput(target, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
     C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
-    C2D_Prepare();
-
     C3D_RenderTarget* top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     C3D_RenderTarget* bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
+
+    sceneInit();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)320, (float)240);
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.MouseDrawCursor = true;
+    imgui_sw::bind_imgui_painting();
+    imgui_sw::SwOptions sw_options;
+    imgui_sw::make_style_fast();
+    imgui_sw::ImGui_ImplC3D_Data* bd = IM_NEW(imgui_sw::ImGui_ImplC3D_Data)();
+    io.BackendRendererUserData = (void*)bd;
+    bd->m_RenderTarget = target;
+    bd->m_Width = 320;
+    bd->m_Height = 240;
+    TickCounter frameTime;
+    touchPosition touch;
 
     // Screen color: #151d23 | Text color: #ABA022
     u32 clrClear = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
@@ -647,8 +682,17 @@ int main(int argc, char **argv) {
 
 main_loop:
     while (aptMainLoop()) {
+        osTickCounterUpdate(&frameTime);
+        io.DeltaTime = osTickCounterRead(&frameTime) * 0.001f;
+        osTickCounterStart(&frameTime);
+
         hidScanInput();
         u32 kDown = hidKeysDown();
+        hidTouchRead(&touch);
+        if(touch.px && touch.py) {
+            io.MouseDown[0] = true;
+            io.MousePos = ImVec2(touch.px, touch.py);
+        } else io.MouseDown[0] = false;
 
         // mod selection
         // won't read multiple inputs at a time due to integer-wise comparison,
@@ -689,6 +733,11 @@ main_loop:
 
         if (done && (kDown & KEY_START)) break;
 
+        // Drawing starts here
+        ImGui::NewFrame();
+        ImGui::ShowDemoWindow(NULL);
+        ImGui::Render();
+
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
         // Top screen: just clear it to background color
@@ -718,6 +767,10 @@ main_loop:
         // Simulate bold text by drawing it twice with a slight 1px horizontal offset
         C2D_DrawText(&text, C2D_WithColor, x + 1.0f, y, 0.5f, scale, scale, clrText);
         C2D_DrawText(&text, C2D_WithColor, x, y, 0.5f, scale, scale, clrText);
+
+        C2D_Prepare();
+        imgui_sw::paint_imgui(320, 240, sw_options);
+        C2D_Flush();
 
         C3D_FrameEnd(0);
     }
