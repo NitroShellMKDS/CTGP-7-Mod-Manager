@@ -35,8 +35,10 @@ struct ImGui_ImplC3D_Data {
 /// Optional: tweak ImGui style to make it render faster.
 void make_style_fast();
 
-/// Call once a the start of your program.
-void bind_imgui_painting();
+/// Call once a the start of your program, after ImGui::CreateContext().
+/// Installs the 3DS system font (drawn by citro2d, see imgui_c2d_text.h) at the given
+/// size in pixels, then uploads the font atlas.
+void bind_imgui_painting(float font_size_px = 16.0f);
 
 /// The buffer is assumed to follow how ImGui packs pixels, i.e. ABGR by default.
 /// Change with IMGUI_USE_BGRA_PACKED_COLOR.

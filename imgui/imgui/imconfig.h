@@ -136,6 +136,10 @@
 //---- Debug Tools: Enable slower asserts
 //#define IMGUI_DEBUG_PARANOID
 
+//---- [3DS] Draw text with citro2d and the shared system font instead of rasterizing it into the font atlas.
+// ImFont::RenderText()/RenderChar() defer to imgui_c2d_text.cpp; see that file for details.
+#define IMGUI_3DS_C2D_TEXT
+
 //---- Tip: You can add extra functions within the ImGui:: namespace from anywhere (e.g. your own sources/header files)
 /*
 namespace ImGui

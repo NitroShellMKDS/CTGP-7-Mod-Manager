@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "imgui_c2d_text.h"
 
 #include <memory>
 
@@ -521,13 +522,19 @@ namespace imgui_sw {
 
 		void paint_draw_list(const PaintTarget& target, const ImDrawList* cmd_list, const SwOptions& options, Stats* stats)
 		{
-			const ImDrawIdx* idx_buffer = &cmd_list->IdxBuffer[0];
+			// .Data, not &IdxBuffer[0]: a draw list made purely of text is all callbacks
+			// and holds no indices at all.
+			const ImDrawIdx* idx_buffer = cmd_list->IdxBuffer.Data;
 			const ImDrawVert* vertices = cmd_list->VtxBuffer.Data;
 
 			for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.size(); cmd_i++)
 			{
 				const ImDrawCmd& pcmd = cmd_list->CmdBuffer[cmd_i];
-				if (pcmd.UserCallback) {
+				if (pcmd.UserCallback == ImDrawCallback_ResetRenderState) {
+					// Sentinel value, not a function pointer. Nothing to reset: every
+					// C2D_Draw* call below sets up its own state.
+				}
+				else if (pcmd.UserCallback) {
 					pcmd.UserCallback(cmd_list, &pcmd);
 				}
 				else {
@@ -549,12 +556,22 @@ namespace imgui_sw {
 		// style.Colors[ImGuiCol_WindowBg].w = 1.0; // Doesn't actually help much.
 	}
 
-	void bind_imgui_painting()
+	static C3D_Tex* s_font_tex = nullptr;
+
+	void bind_imgui_painting(float font_size_px)
 	{
 		ImGuiIO& io = ImGui::GetIO();
 
-		// Load default font (embedded in code):
-		static C3D_Tex* tex = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
+		// Text comes from the 3DS system font via citro2d; the atlas below then only
+		// carries the white pixel and the mouse cursors. Fall back to ImGui's embedded
+		// font if the shared system font can't be mapped.
+		if (!imgui_c2d::init(font_size_px))
+			io.Fonts->AddFontDefault();
+
+		if (s_font_tex == nullptr)
+			s_font_tex = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
+		C3D_Tex* tex = s_font_tex;
+
 		uint8_t* tex_data;
 		int font_width, font_height;
 		io.Fonts->GetTexDataAsAlpha8(&tex_data, &font_width, &font_height);
@@ -591,13 +608,19 @@ namespace imgui_sw {
 		for (int i = 0; i < draw_data->CmdListsCount; ++i) {
 			paint_draw_list(target, draw_data->CmdLists[i], options, &s_stats);
 		}
+
+		// The text queued by this frame's draw lists has now been drawn.
+		imgui_c2d::end_frame();
 	}
 
 	void unbind_imgui_painting()
 	{
-		ImGuiIO& io = ImGui::GetIO();
-		delete reinterpret_cast<C3D_Tex*>( io.Fonts->TexData->TexID );
-		io.Fonts = nullptr;
+		imgui_c2d::shutdown();
+		if (s_font_tex != nullptr) {
+			C3D_TexDelete(s_font_tex);
+			linearFree(s_font_tex);
+			s_font_tex = nullptr;
+		}
 	}
 
 	bool show_options(SwOptions* io_options)

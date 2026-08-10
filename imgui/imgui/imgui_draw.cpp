@@ -42,6 +42,10 @@ Index of this file:
 #include <stdio.h>      // vsnprintf, sscanf, printf
 #include <stdint.h>     // intptr_t
 
+#ifdef IMGUI_3DS_C2D_TEXT
+#include "imgui_c2d_text.h" // [3DS] see the hooks in ImFont::RenderChar()/RenderText()
+#endif
+
 // Visual Studio warnings
 #ifdef _MSC_VER
 #pragma warning (disable: 4127)     // condition expression is constant
@@ -5553,6 +5557,11 @@ ImVec2 ImFont::CalcTextSizeA(float size, float max_width, float wrap_width, cons
 // Note: as with every ImDrawList drawing function, this expects that the font atlas texture is bound.
 void ImFont::RenderChar(ImDrawList* draw_list, float size, const ImVec2& pos, ImU32 col, ImWchar c, const ImVec4* cpu_fine_clip)
 {
+#ifdef IMGUI_3DS_C2D_TEXT
+    // [3DS] Text is drawn by citro2d from the system font, not from the atlas.
+    if (imgui_c2d::render_char(this, draw_list, size, pos, col, c, cpu_fine_clip))
+        return;
+#endif
     ImFontBaked* baked = GetFontBaked(size);
     const ImFontGlyph* glyph = baked->FindGlyph(c);
     if (!glyph || !glyph->Visible)
@@ -5592,6 +5601,13 @@ void ImFont::RenderChar(ImDrawList* draw_list, float size, const ImVec2& pos, Im
 // Note: as with every ImDrawList drawing function, this expects that the font atlas texture is bound.
 void ImFont::RenderText(ImDrawList* draw_list, float size, const ImVec2& pos, ImU32 col, const ImVec4& clip_rect, const char* text_begin, const char* text_end, float wrap_width, bool cpu_fine_clip)
 {
+#ifdef IMGUI_3DS_C2D_TEXT
+    // [3DS] Text is drawn by citro2d from the system font, not from the atlas.
+    // 'cpu_fine_clip' needs no special handling: ImDrawList::AddText() has already
+    // folded the fine clip rect into 'clip_rect' before getting here.
+    if (imgui_c2d::render_text(this, draw_list, size, pos, col, clip_rect, text_begin, text_end, wrap_width))
+        return;
+#endif
     // Align to be pixel perfect
 begin:
     float x = IM_TRUNC(pos.x);

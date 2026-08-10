@@ -887,7 +887,7 @@ int main(int argc, char **argv) {
         ImGui::CreateContext();
         io = &ImGui::GetIO();
         io->DisplaySize = ImVec2(320.0f, 240.0f);
-        imgui_sw::bind_imgui_painting();
+        imgui_sw::bind_imgui_painting(16.0f); // 3DS system font at 16px, same size the old UI used
         imgui_sw::make_style_fast();
 
         ImGuiStyle& style = ImGui::GetStyle();
