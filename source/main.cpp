@@ -4,6 +4,10 @@
 #include <curl/curl.h>
 #include <json-c/json.h>
 
+#include <stdio.h>      /* jpeglib.h needs FILE in scope */
+#include <setjmp.h>
+#include <jpeglib.h>
+
 #include <algorithm>
 #include <cfloat>
 #include <cinttypes>
@@ -141,30 +145,34 @@ static const ImVec4 IM_UNINST_FG = MakeTextColor(0xFF, 0x88, 0x88);
 static constexpr float TOP_W = 400.0f, TOP_H = 240.0f;
 static constexpr float BOT_W = 320.0f, BOT_H = 240.0f;
 
-/* The desktop original tiles 12 cards three-wide in a 400x240 portrait-ish window.
- * The 3DS top screen is the same 400x240 but landscape, so the same 12 cards go
- * four-wide: that keeps each card near the original's 120x105 proportions instead of
- * squashing it into a 133x60 letterbox with no room for a thumbnail. Paging still
- * advances exactly one row at a time, as it does upstream. */
-static constexpr int GRID_COLS      = 4;
-static constexpr int GRID_ROWS      = 3;
+/* The original's UniformGrid is 3 columns of ~124x123 cards (120x105 border, plus the
+ * status line and margins). Its window is 400x240 -- the same size as this screen -- so
+ * only about two rows are ever on screen; the rest of the 12 loaded cards sit below the
+ * fold in a ScrollViewer. Matching that as a 3x2 visible grid gives cells of 133x120,
+ * within a few pixels of the original card, and leaves the thumbnail room to render at
+ * its full 110x62. Scrolling advances one row at a time, as the ScrollViewer does. */
+static constexpr int GRID_COLS      = 3;
+static constexpr int GRID_ROWS      = 2;
 static constexpr int CARDS_PER_PAGE = GRID_COLS * GRID_ROWS;
 
-static constexpr float CELL_W      = TOP_W / GRID_COLS;              /* 100 */
-static constexpr float CELL_H      = TOP_H / GRID_ROWS;              /*  80 */
-static constexpr float CARD_MARGIN = 2.0f;                           /* gap between cells       */
-static constexpr float CARD_BORDER = 2.0f;                           /* BorderThickness="2"     */
-static constexpr float CARD_W      = CELL_W - CARD_MARGIN * 2.0f;    /*  96 */
-static constexpr float CARD_H      = CELL_H - CARD_MARGIN * 2.0f;    /*  76 */
-static constexpr float CONTENT_W   = CARD_W - CARD_BORDER * 2.0f;    /*  92 */
-static constexpr float CONTENT_H   = CARD_H - CARD_BORDER * 2.0f;    /*  72 */
-static constexpr float TEXT_MAX_W  = CONTENT_W - 4.0f;               /*  88 */
+static constexpr float CELL_W      = TOP_W / GRID_COLS;              /* 133.33 */
+static constexpr float CELL_H      = TOP_H / GRID_ROWS;              /* 120    */
+static constexpr float CARD_MARGIN = 2.0f;                           /* gap between cells    */
+static constexpr float CARD_BORDER = 2.0f;                           /* BorderThickness="2"  */
+static constexpr float CARD_W      = CELL_W - CARD_MARGIN * 2.0f;    /* 129.33 */
+static constexpr float CARD_H      = CELL_H - CARD_MARGIN * 2.0f;    /* 116    */
+static constexpr float CONTENT_W   = CARD_W - CARD_BORDER * 2.0f;    /* 125.33 */
+static constexpr float CONTENT_H   = CARD_H - CARD_BORDER * 2.0f;    /* 112    */
+static constexpr float TEXT_MAX_W  = CONTENT_W - 4.0f;               /* 121.33 */
 
-/* Row offsets are measured from the card's content origin and stack to CONTENT_H. */
-static constexpr float THUMB_H   = 38.0f;
-static constexpr float NAME_Y    = 39.0f, NAME_PX   = 12.0f;  /* original FontSize 10 */
-static constexpr float AUTHOR_Y  = 51.0f, AUTHOR_PX =  9.6f;  /* original FontSize  8 */
-static constexpr float STATUS_Y  = 61.0f, STATUS_PX = 10.2f;  /* original FontSize 10 */
+/* Row offsets are measured from the card's content origin and stack to CONTENT_H. The
+ * thumbnail spans the full card width at the cached image's 110:62 aspect, so essentially
+ * none of it is cropped away. Text heights are line heights, which is why they sit above
+ * the original's em-based FontSize 10 / 8 / 10. */
+static constexpr float THUMB_H   = 70.0f;
+static constexpr float NAME_Y    = 71.0f, NAME_PX   = 14.0f;  /* original FontSize 10 */
+static constexpr float AUTHOR_Y  = 85.0f, AUTHOR_PX = 11.0f;  /* original FontSize  8 */
+static constexpr float STATUS_Y  = 97.0f, STATUS_PX = 14.0f;  /* original FontSize 10 */
 static constexpr float MSG_PX    = 18.0f;                     /* full-screen messages */
 
 /* Bottom-screen controls, sized as in BottomScreenWindow.axaml. */
@@ -1118,7 +1126,10 @@ static void drain_pages(std::vector<PageResult>& results, std::vector<ModData>& 
 static void fetch_thread_func(void* arg) {
     (void)arg;
 
-    rmrf(CACHE_DIR);
+    /* Only the listings are forced stale each launch. cache/images/ is keyed by mod id and
+     * never goes stale, and re-downloading thousands of thumbnails every run would be
+     * absurd -- same reasoning as keeping installed_mods.json outside CACHE_DIR. */
+    rmrf(LISTS_DIR);
     init_paths();
     share_init();
 
@@ -1585,16 +1596,24 @@ static const ModData *selected_mod() {
     return &g_mods[static_cast<size_t>(g_winStart + g_selIdx)];
 }
 
-/* Re-sorts only the cards currently on screen and leaves the cursor exactly where it
- * is. ResortVisibleCards() upstream reorders the visible page in place and never
- * assigns SelectedIndex, so the highlight holds its grid position and whichever mod
- * lands there becomes the selection. */
-static void resort_window() {
-    const int n = visible_count();
-    if (n <= 1) return;
+/* Installing or uninstalling changes a mod's priority, so the whole list is re-sorted --
+ * not just the visible page. The mod then takes its place among *all* mods: updates
+ * first, then installed, then the rest, each group ordered by the active sort. That is
+ * what GetSortedMods() yields upstream once the window reloads.
+ *
+ * The cursor keeps its grid position rather than chasing the mod, matching
+ * ResortVisibleCards(), which reorders cards and never assigns SelectedIndex. */
+static void resort_after_install_change() {
+    sort_mods();
 
-    std::vector<ModData>::iterator first = g_mods.begin() + g_winStart;
-    std::stable_sort(first, first + n, mod_sort_less);
+    /* The list length cannot change here; these only guard a window already at the end. */
+    const int max_start = max_win_start();
+    if (g_winStart > max_start) g_winStart = max_start;
+    if (g_winStart < 0)         g_winStart = 0;
+
+    const int n = visible_count();
+    if (g_selIdx >= n) g_selIdx = n - 1;
+    if (g_selIdx < 0)  g_selIdx = 0;
     g_cardTextDirty = true;
 }
 
@@ -1606,33 +1625,27 @@ static ModAction current_action() {
     return mod->LatestFileDate > it->second.Date ? ACTION_UPDATE : ACTION_INSTALLED;
 }
 
-/* Scrolls one row when the cursor enters the top or bottom row, so the window trails
- * the selection instead of snapping a page at a time (TryShiftAsync upstream). */
-static void try_shift_window() {
-    if (mod_count() <= CARDS_PER_PAGE) return;
-
-    const int n         = visible_count();
+/* Scrolls the window by one row, leaving the cursor on its slot so the incoming row
+ * arrives under it. Returns false when there is nothing further that way. */
+static bool scroll_window(int dr) {
     const int max_start = max_win_start();
     const int before    = g_winStart;
 
-    if (g_selIdx >= n - GRID_COLS && g_winStart < max_start) {
-        g_winStart += GRID_COLS;
-        if (g_winStart > max_start) g_winStart = max_start;
-        g_selIdx   -= (g_winStart - before);
-    } else if (g_selIdx < GRID_COLS && g_winStart > 0) {
-        g_winStart -= GRID_COLS;
-        if (g_winStart < 0) g_winStart = 0;
-        g_selIdx   += (before - g_winStart);
-    }
+    g_winStart += dr * GRID_COLS;
+    if (g_winStart < 0)         g_winStart = 0;
+    if (g_winStart > max_start) g_winStart = max_start;
+    if (g_winStart == before) return false;
 
-    if (g_winStart == before) return;
-
-    const int nv = visible_count();
-    if (g_selIdx >= nv) g_selIdx = nv - 1;
-    if (g_selIdx < 0)   g_selIdx = 0;
+    const int n = visible_count();
+    if (g_selIdx >= n) g_selIdx = n - 1;
+    if (g_selIdx < 0)  g_selIdx = 0;
     g_cardTextDirty = true;
+    return true;
 }
 
+/* With only two rows on screen every cell sits in an edge row, so scrolling has to be
+ * driven by direction rather than by "the cursor reached the edge" -- otherwise a
+ * sideways move along the top row would scroll the list. */
 static void handle_nav(u32 keys) {
     const int n = visible_count();
     if (n <= 0) return;
@@ -1644,23 +1657,31 @@ static void handle_nav(u32 keys) {
     else if (keys & (KEY_DUP    | KEY_CPAD_UP))    dr = -1;
     else return;
 
+    const int row = g_selIdx / GRID_COLS;
+    const int col = g_selIdx % GRID_COLS;
+
+    if (dc != 0) {
+        /* Sideways stays within the row and never scrolls. */
+        int nc = col + dc;
+        if (nc < 0)             nc = 0;
+        if (nc > GRID_COLS - 1) nc = GRID_COLS - 1;
+
+        int idx = row * GRID_COLS + nc;
+        if (idx >= n) idx = n - 1;      /* the last row may be partial */
+        g_selIdx = idx;
+        return;
+    }
+
     const int max_row = (n - 1) / GRID_COLS;
-    const int max_col = (n - 1) < (GRID_COLS - 1) ? (n - 1) : (GRID_COLS - 1);
+    const int nr      = row + dr;
+    if (nr >= 0 && nr <= max_row) {
+        int idx = nr * GRID_COLS + col;
+        if (idx >= n) idx = n - 1;
+        g_selIdx = idx;
+        return;
+    }
 
-    int row = g_selIdx / GRID_COLS + dr;
-    int col = g_selIdx % GRID_COLS + dc;
-    if (row < 0) row = 0; else if (row > max_row) row = max_row;
-    if (col < 0) col = 0; else if (col > max_col) col = max_col;
-
-    int idx = row * GRID_COLS + col;
-    if (idx >= n) idx = n - 1;          /* the last row may be partial */
-
-    const bool moved = (idx != g_selIdx);
-    g_selIdx = idx;
-
-    /* Vertical presses also shift when the cursor is already pinned to the edge row --
-     * otherwise the index never changes there and the list could not be scrolled. */
-    if (moved || dr != 0) try_shift_window();
+    scroll_window(dr);   /* pinned to the edge row: bring the next row to the cursor */
 }
 
 /* Turns a held direction into a repeating stream of presses, standing in for the OS
@@ -1694,7 +1715,7 @@ static u32 nav_repeat(u32 kDown, u32 kHeld, float dt) {
 
 /* Stands in for download + extract: records the mod as installed so the browse, sort
  * and uninstall paths can be exercised, and writes nothing to CTGP7_DIR.
- * NOTE: `mod` points into g_mods, which resort_window() reorders -- everything read
+ * NOTE: `mod` points into g_mods, which the re-sort below reorders -- everything read
  * from it must be read before that call. */
 static void fake_install(const ModData& mod) {
     const int id = mod.Id;
@@ -1706,14 +1727,14 @@ static void fake_install(const ModData& mod) {
 
     g_installed[id] = std::move(rec);
     save_installed_mods();
-    resort_window();
+    resort_after_install_change();
 }
 
 /* Stands in for deleting the extracted .chpack files and dropping the record. */
 static void fake_uninstall(const ModData& mod) {
     if (g_installed.erase(mod.Id) == 0) return;
     save_installed_mods();
-    resort_window();
+    resort_after_install_change();
 }
 
 /* Test affordance with no counterpart upstream: rolls the recorded install date back so
@@ -1724,7 +1745,7 @@ static void fake_mark_outdated(const ModData& mod) {
     if (it == g_installed.end() || mod.LatestFileDate > it->second.Date) return;
     it->second.Date = mod.LatestFileDate - 1;
     save_installed_mods();
-    resort_window();
+    resort_after_install_change();
 }
 
 static void do_action() {
@@ -1755,6 +1776,758 @@ static void set_sort_mode(bool by_name) {
     g_cardTextDirty = true;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Thumbnails                                                                */
+/* -------------------------------------------------------------------------- */
+
+/* The cache format is byte-compatible with the desktop original: a 110x62 JPEG at
+ * quality 50 in cache/images/<modId>.jpg, cropped the same way. The directory can be
+ * copied between the two builds in either direction. */
+static constexpr int    THUMB_IMG_W        = 110;   /* AppConfig.FinalThumbnailWidth  */
+static constexpr int    THUMB_IMG_H        = 62;    /* AppConfig.FinalThumbnailHeight */
+static constexpr int    THUMB_JPEG_QUALITY = 50;    /* JpegEncoder { Quality = 50 }   */
+
+/* Next power of two up from 110x62; the PICA200 only samples POT textures. */
+static constexpr u16    THUMB_TEX_W     = 128;
+static constexpr u16    THUMB_TEX_H     = 64;
+static constexpr size_t THUMB_TEX_BYTES = (size_t)THUMB_TEX_W * THUMB_TEX_H * 2u;  /* RGB565 */
+
+static constexpr int    THUMB_SLOTS     = 16;   /* 12 on screen + headroom to evict into */
+static constexpr int    THUMB_WORKERS   = 3;
+static constexpr int    THUMB_QUEUE     = CARDS_PER_PAGE;
+static constexpr int    THUMB_FAIL_RING = 64;
+
+static constexpr size_t THUMB_URL_MAX      = 192;
+static constexpr size_t THUMB_PATH_MAX     = 128;
+static constexpr size_t THUMB_MAX_BYTES    = 1024 * 1024;   /* _sFile fallback can be big */
+static constexpr unsigned THUMB_SRC_MAX_DIM    = 4096;      /* decompression-bomb guards  */
+static constexpr size_t   THUMB_SRC_MAX_PIXELS = 2000000;
+static constexpr s64    THUMB_IDLE_WAIT_NS = 50000000LL;    /* 50ms                       */
+
+struct RawImage { unsigned char *rgb; int w, h; };   /* POD: safe around setjmp */
+
+struct ThumbSlot {
+    C3D_Tex tex;
+    int     modId;      /* 0 == empty */
+    u32     lastUsed;
+};
+
+struct ThumbReq { int id; char url[THUMB_URL_MAX]; };
+
+struct ThumbPub {
+    u16       *pixels;      /* linearAlloc'd staging, swapped with a slot on publish */
+    LightEvent ack;
+    int        modId;
+    bool       ready;
+    bool       ok;
+};
+
+/* Slots are touched only by the main thread. Workers touch the queue, the in-flight
+ * table and their own publish record -- never a C3D_Tex, g_mods or g_winStart. */
+static ThumbSlot         g_thumbSlot[THUMB_SLOTS];
+static ThumbPub          g_thumbPub[THUMB_WORKERS];
+static Thread            g_thumbThread[THUMB_WORKERS];
+static ThumbReq          g_thumbQueue[THUMB_QUEUE];
+static int               g_thumbQueueN = 0;
+static int               g_thumbFlight[THUMB_WORKERS];
+static int               g_thumbFail[THUMB_FAIL_RING];
+static int               g_thumbFailPos = 0;
+static int               g_thumbWant[CARDS_PER_PAGE];
+static int               g_thumbWantN   = 0;
+static u32               g_thumbFrame   = 0;
+static bool              g_thumbReady   = false;
+static LightLock         g_thumbLock;
+static LightLock         g_thumbDiskLock;   /* SD access is serial anyway */
+static LightEvent        g_thumbWake;
+static std::atomic<bool> g_thumbQuit(false);
+static Tex3DS_SubTexture g_thumbSubTex;
+
+/* -------------------------------------------------------------------------- */
+/*  JPEG decode / encode                                                      */
+/* -------------------------------------------------------------------------- */
+
+/* libjpeg reports errors by longjmp. The build is -fno-exceptions, so GCC emits no
+ * cleanup paths: nothing with a non-trivial destructor may be live in either of the two
+ * functions below, and every scalar live across the setjmp must be volatile or -Wclobbered
+ * fires (and the value really would be undefined). cinfo and jerr are address-taken, which
+ * forces them to memory, so they need neither. */
+struct ThumbJpegErr {
+    struct jpeg_error_mgr pub;
+    jmp_buf               jb;
+};
+
+static void thumb_jpeg_error_exit(j_common_ptr cinfo) {
+    longjmp(reinterpret_cast<ThumbJpegErr*>(cinfo->err)->jb, 1);
+}
+
+/* libjpeg's default writes to stderr, which is nowhere on a 3DS. */
+static void thumb_jpeg_silence(j_common_ptr) { }
+
+/* Smallest N in [1,8] where ceil(w*N/8) >= 110 and ceil(h*N/8) >= 62, i.e. the cheapest
+ * DCT scaling that still leaves the crop enough pixels. (v*N+7)/8 is exactly libjpeg's
+ * jdiv_round_up, so this agrees with jpeg_calc_output_dimensions. Requiring both axes is
+ * a superset of what the crop needs, so it can never under-sample. The usual 220x124
+ * source lands on N=4 and decodes straight to 110x62 for free. */
+static int thumb_pick_scale_num(unsigned int w, unsigned int h) {
+    for (unsigned int n = 1; n < 8; n++) {
+        if ((w * n + 7u) / 8u >= (unsigned int)THUMB_IMG_W &&
+            (h * n + 7u) / 8u >= (unsigned int)THUMB_IMG_H) {
+            return (int)n;
+        }
+    }
+    return 8;
+}
+
+static bool thumb_jpeg_decode(const unsigned char *src, size_t len, RawImage *out) {
+    struct jpeg_decompress_struct cinfo;
+    ThumbJpegErr                  jerr;
+    unsigned char *volatile       rgb  = nullptr;
+    volatile bool                 ok   = false;
+    volatile int                  outW = 0;
+    volatile int                  outH = 0;
+
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit     = thumb_jpeg_error_exit;
+    jerr.pub.output_message = thumb_jpeg_silence;
+
+    /* Before create: jpeg_CreateDecompress nulls cinfo.mem first thing, so the
+     * unconditional destroy below is valid even if creation itself longjmp'd. */
+    if (setjmp(jerr.jb) == 0) {
+        jpeg_create_decompress(&cinfo);
+        jpeg_mem_src(&cinfo, src, (unsigned long)len);
+
+        if (jpeg_read_header(&cinfo, TRUE) == JPEG_HEADER_OK &&
+            cinfo.image_width  > 0 && cinfo.image_width  <= THUMB_SRC_MAX_DIM &&
+            cinfo.image_height > 0 && cinfo.image_height <= THUMB_SRC_MAX_DIM) {
+
+            cinfo.scale_num   = (unsigned int)thumb_pick_scale_num(cinfo.image_width,
+                                                                   cinfo.image_height);
+            cinfo.scale_denom = 8;
+            cinfo.out_color_space     = JCS_RGB;
+            cinfo.dct_method          = JDCT_IFAST;
+            cinfo.do_fancy_upsampling = FALSE;
+            jpeg_calc_output_dimensions(&cinfo);
+
+            /* Checked post-scaling and pre-allocation, so a bomb costs nothing. */
+            if (cinfo.output_components == 3 &&
+                (size_t)cinfo.output_width * (size_t)cinfo.output_height <= THUMB_SRC_MAX_PIXELS) {
+                rgb = (unsigned char*)malloc((size_t)cinfo.output_width *
+                                             (size_t)cinfo.output_height * 3u);
+                if (rgb) {
+                    jpeg_start_decompress(&cinfo);
+                    while (cinfo.output_scanline < cinfo.output_height) {
+                        JSAMPROW row = rgb + (size_t)cinfo.output_scanline *
+                                             (size_t)cinfo.output_width * 3u;
+                        if (jpeg_read_scanlines(&cinfo, &row, 1) != 1) break;
+                    }
+                    ok   = (cinfo.output_scanline >= cinfo.output_height);
+                    outW = (int)cinfo.output_width;
+                    outH = (int)cinfo.output_height;
+                    jpeg_finish_decompress(&cinfo);
+                }
+            }
+        }
+    }
+    jpeg_destroy_decompress(&cinfo);
+
+    if (!ok) { free(rgb); return false; }   /* free(nullptr) is well defined */
+    out->rgb = rgb;
+    out->w   = outW;
+    out->h   = outH;
+    return true;
+}
+
+static bool thumb_jpeg_encode(const unsigned char *rgb, unsigned char **outBuf,
+                              unsigned long *outLen) {
+    struct jpeg_compress_struct cinfo;
+    ThumbJpegErr                jerr;
+    unsigned char              *buf = nullptr;   /* address-taken -> forced to memory */
+    unsigned long               len = 0;         /* likewise, so neither needs volatile */
+    volatile bool               ok  = false;
+
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit     = thumb_jpeg_error_exit;
+    jerr.pub.output_message = thumb_jpeg_silence;
+
+    if (setjmp(jerr.jb) == 0) {
+        jpeg_create_compress(&cinfo);
+        jpeg_mem_dest(&cinfo, &buf, &len);
+
+        cinfo.image_width      = (JDIMENSION)THUMB_IMG_W;
+        cinfo.image_height     = (JDIMENSION)THUMB_IMG_H;
+        cinfo.input_components = 3;
+        cinfo.in_color_space   = JCS_RGB;
+        jpeg_set_defaults(&cinfo);
+        jpeg_set_quality(&cinfo, THUMB_JPEG_QUALITY, TRUE);
+
+        jpeg_start_compress(&cinfo, TRUE);
+        while (cinfo.next_scanline < cinfo.image_height) {
+            JSAMPROW row = const_cast<JSAMPROW>(rgb + (size_t)cinfo.next_scanline *
+                                                      (size_t)THUMB_IMG_W * 3u);
+            if (jpeg_write_scanlines(&cinfo, &row, 1) != 1) break;
+        }
+        /* Only claim success once finish_compress has returned -- it flushes the tail of
+         * the stream, and a longjmp out of it would leave a truncated file. */
+        if (cinfo.next_scanline >= cinfo.image_height) {
+            jpeg_finish_compress(&cinfo);
+            ok = true;
+        }
+    }
+    jpeg_destroy_compress(&cinfo);
+
+    if (!ok || !buf) { free(buf); return false; }
+    *outBuf = buf;
+    *outLen = len;
+    return true;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Crop, scale, tile                                                         */
+/* -------------------------------------------------------------------------- */
+
+/* Crops to the 110:62 aspect -- horizontally centred, top edge anchored (cy = 0, exactly
+ * as ProcessImageAsync does) -- then box-filters down to 110x62. Lanczos3 like the desktop
+ * build buys nothing visible at 92x38 through a quality-50 JPEG, and the ARM11 has no
+ * vector unit; after DCT scaling this is only 1-4 taps per output pixel anyway. */
+static void thumb_crop_resize(const RawImage *src, unsigned char *dst) {
+    const int sw = src->w;
+    const int sh = src->h;
+
+    int cw, ch;
+    if (sw * THUMB_IMG_H >= sh * THUMB_IMG_W) {     /* sw/sh >= 110/62, exactly */
+        cw = (sh * THUMB_IMG_W) / THUMB_IMG_H;
+        ch = sh;
+    } else {
+        cw = sw;
+        ch = (sw * THUMB_IMG_H) / THUMB_IMG_W;
+    }
+    /* Integer truncation zeroes a dimension at extreme aspects (a 1px-wide source gives
+     * ch = 0). ImageSharp throws there and the original silently drops the thumbnail;
+     * clamping keeps the maths total and still yields something. */
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+
+    int cx = (sw - cw) / 2;
+    if (cx < 0) cx = 0;
+    const int cy = 0;
+    if (cw > sw - cx) cw = sw - cx;
+    if (ch > sh)      ch = sh;
+
+    for (int dy = 0; dy < THUMB_IMG_H; dy++) {
+        int sy0 = cy + (dy * ch) / THUMB_IMG_H;
+        int sy1 = cy + ((dy + 1) * ch) / THUMB_IMG_H;
+        if (sy1 <= sy0)     sy1 = sy0 + 1;
+        if (sy1 > cy + ch)  sy1 = cy + ch;
+
+        for (int dx = 0; dx < THUMB_IMG_W; dx++) {
+            int sx0 = cx + (dx * cw) / THUMB_IMG_W;
+            int sx1 = cx + ((dx + 1) * cw) / THUMB_IMG_W;
+            if (sx1 <= sx0)    sx1 = sx0 + 1;
+            if (sx1 > cx + cw) sx1 = cx + cw;
+
+            unsigned int r = 0, g = 0, b = 0, n = 0;
+            for (int sy = sy0; sy < sy1; sy++) {
+                const unsigned char *p = src->rgb + ((size_t)sy * (size_t)sw + (size_t)sx0) * 3u;
+                for (int sx = sx0; sx < sx1; sx++, p += 3) {
+                    r += p[0];
+                    g += p[1];
+                    b += p[2];
+                    n++;
+                }
+            }
+
+            unsigned char *o = dst + ((size_t)dy * (size_t)THUMB_IMG_W + (size_t)dx) * 3u;
+            o[0] = (unsigned char)(r / n);
+            o[1] = (unsigned char)(g / n);
+            o[2] = (unsigned char)(b / n);
+        }
+    }
+}
+
+/* RGB888 -> tiled RGB565. The 3DS stores textures as 8x8 tiles with Morton order inside
+ * each tile; this index matches the font upload in imgui_sw.cpp, the only other place in
+ * the tree that tiles anything. It is an element index, so for 16bpp it applies to a u16*
+ * unchanged. Verified off-device to be a bijection over [0, 8192) for 128x64.
+ * Padding past the image replicates the edge pixel so GPU_LINEAR never picks up
+ * uninitialised texels at the u = 110/128 and v = 1 - 62/64 seams. */
+static void thumb_swizzle_rgb565(const unsigned char *src, int srcW, int srcH, u16 *dst) {
+    for (u32 y = 0; y < THUMB_TEX_H; y++) {
+        const u32 sy = (y < (u32)srcH) ? y : (u32)(srcH - 1);
+        const unsigned char *row = src + (size_t)sy * (size_t)srcW * 3u;
+        const u32 tileRow = ((y >> 3) * (THUMB_TEX_W >> 3)) << 6;
+        const u32 yBits   = ((y & 1u) << 1) | ((y & 2u) << 2) | ((y & 4u) << 3);
+
+        for (u32 x = 0; x < THUMB_TEX_W; x++) {
+            const u32 sx = (x < (u32)srcW) ? x : (u32)(srcW - 1);
+            const unsigned char *p = row + (size_t)sx * 3u;
+            const u16 c = (u16)((((u32)p[0] & 0xF8u) << 8)
+                              | (((u32)p[1] & 0xFCu) << 3)
+                              |  ((u32)p[2] >> 3));
+            dst[tileRow + ((x >> 3) << 6)
+                + ((x & 1u) | ((x & 2u) << 1) | ((x & 4u) << 2) | yBits)] = c;
+        }
+    }
+}
+
+/* The card's 92x38 box is a wider aspect than the 110x62 cache image, so the display
+ * needs its own crop. Avalonia's Stretch="UniformToFill" scales to cover and centres the
+ * overflow; expressed as subtexture UVs that costs nothing at draw time. */
+static void thumb_build_subtex() {
+    const float sx = CONTENT_W / (float)THUMB_IMG_W;
+    const float sy = THUMB_H   / (float)THUMB_IMG_H;
+    const float s  = sx > sy ? sx : sy;
+
+    /* The cover scale lands one axis exactly on the source size, and binary floating
+     * point can overshoot it by an ulp -- which would push a UV outside [0,1]. */
+    float visW = CONTENT_W / s;
+    float visH = THUMB_H   / s;
+    if (visW > (float)THUMB_IMG_W) visW = (float)THUMB_IMG_W;
+    if (visH > (float)THUMB_IMG_H) visH = (float)THUMB_IMG_H;
+
+    float x0 = ((float)THUMB_IMG_W - visW) * 0.5f;
+    float y0 = ((float)THUMB_IMG_H - visH) * 0.5f;
+    if (x0 < 0.0f) x0 = 0.0f;
+    if (y0 < 0.0f) y0 = 0.0f;
+
+    /* v is flipped relative to storage (imgui_sw.cpp uses the same 1 - y/h convention),
+     * which is why the swizzle above writes rows top-first with no flip of its own. */
+    g_thumbSubTex.width  = (u16)CONTENT_W;
+    g_thumbSubTex.height = (u16)THUMB_H;
+    g_thumbSubTex.left   =         x0          / (float)THUMB_TEX_W;
+    g_thumbSubTex.right  =        (x0 + visW)  / (float)THUMB_TEX_W;
+    g_thumbSubTex.top    = 1.0f -  y0          / (float)THUMB_TEX_H;
+    g_thumbSubTex.bottom = 1.0f - (y0 + visH)  / (float)THUMB_TEX_H;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Disk cache and download                                                   */
+/* -------------------------------------------------------------------------- */
+
+static void thumb_cache_path(int modId, char *out, size_t outLen) {
+    snprintf(out, outLen, "%s%d.jpg", THUMBNAIL_CACHE_DIR, modId);
+}
+
+static bool thumb_read_file(const char *path, unsigned char **out, size_t *outLen) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    unsigned char *buf = nullptr;
+    long sz = 0;
+    bool ok = false;
+
+    if (fseek(f, 0, SEEK_END) == 0) {
+        sz = ftell(f);
+        if (sz > 0 && (size_t)sz <= THUMB_MAX_BYTES) {
+            rewind(f);
+            buf = (unsigned char*)malloc((size_t)sz);
+            if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz) ok = true;
+        }
+    }
+    fclose(f);
+
+    if (!ok) { free(buf); return false; }
+    *out    = buf;
+    *outLen = (size_t)sz;
+    return true;
+}
+
+static bool thumb_write_atomic(const char *path, const void *data, size_t len) {
+    char tmp[THUMB_PATH_MAX + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return false;
+    const bool wrote  = (fwrite(data, 1, len, f) == len);
+    const bool closed = (fclose(f) == 0);
+    if (!wrote || !closed) { unlink(tmp); return false; }
+
+    /* rename() on the 3DS maps to FSUSER_RenameFile, which fails if the target exists --
+     * there is no File.Move(overwrite: true) equivalent. */
+    unlink(path);
+    if (rename(tmp, path) != 0) { unlink(tmp); return false; }
+    return true;
+}
+
+struct ThumbDl { unsigned char *data; size_t len; size_t cap; };
+
+static size_t thumb_write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
+    ThumbDl *dl = static_cast<ThumbDl*>(userp);
+    const size_t total = size * nmemb;
+    if (total == 0) return 0;
+    if (dl->len + total > THUMB_MAX_BYTES) return 0;   /* short write aborts the transfer */
+
+    if (dl->len + total > dl->cap) {
+        size_t cap = dl->cap ? dl->cap : 32768;
+        while (cap < dl->len + total) cap *= 2;
+        unsigned char *nb = (unsigned char*)realloc(dl->data, cap);
+        if (!nb) return 0;
+        dl->data = nb;
+        dl->cap  = cap;
+    }
+    memcpy(dl->data + dl->len, contents, total);
+    dl->len += total;
+    return total;
+}
+
+/* Lets a shutdown interrupt an in-flight download instead of waiting out the timeout. */
+static int thumb_abort_cb(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return g_thumbQuit.load() ? 1 : 0;
+}
+
+static void thumb_curl_configure(CURL *curl) {
+    curl_configure(curl);
+    /* curl_configure attaches g_curlShare, which fetch_thread_func destroys the moment the
+     * listing finishes; a thumbnail handle must never inherit that pointer. */
+    curl_easy_setopt(curl, CURLOPT_SHARE, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, thumb_write_cb);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, nullptr);  /* JPEG is already compressed */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, thumb_abort_cb);
+}
+
+/* Disk hit, else download; then crop, scale, persist, and tile into `outSwizzled`.
+ * Runs entirely on a worker thread and touches no GPU or browser state. */
+static bool thumb_produce(CURL *curl, int modId, const char *url, u16 *outSwizzled) {
+    char           path[THUMB_PATH_MAX];
+    RawImage       img      = { nullptr, 0, 0 };
+    ThumbDl        dl       = { nullptr, 0, 0 };
+    unsigned char *file     = nullptr;
+    size_t         fileLen  = 0;
+    unsigned char *scaled   = nullptr;
+    unsigned char *jpg      = nullptr;
+    unsigned long  jpgLen   = 0;
+    bool           fromDisk = false;
+    bool           ok       = false;
+    long           code     = 0;
+
+    thumb_cache_path(modId, path, sizeof(path));
+
+    LightLock_Lock(&g_thumbDiskLock);
+    const bool haveFile = thumb_read_file(path, &file, &fileLen);
+    LightLock_Unlock(&g_thumbDiskLock);
+
+    if (haveFile) {
+        if (thumb_jpeg_decode(file, fileLen, &img)) {
+            fromDisk = true;
+        } else {
+            /* Corrupt cache entry: drop it and refetch, as the original's catch does. */
+            LightLock_Lock(&g_thumbDiskLock);
+            unlink(path);
+            LightLock_Unlock(&g_thumbDiskLock);
+        }
+        free(file);
+        file = nullptr;
+    }
+
+    if (!fromDisk) {
+        if (!curl || url[0] == '\0' || g_thumbQuit.load()) goto done;
+
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &dl);
+        if (curl_easy_perform(curl) != CURLE_OK) goto done;
+        if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code) != CURLE_OK) goto done;
+        if (code < 200 || code >= 300 || dl.len < 3) goto done;
+
+        /* JPEG only. An HTML error page or anything else is simply "no thumbnail". */
+        if (dl.data[0] != 0xFF || dl.data[1] != 0xD8 || dl.data[2] != 0xFF) goto done;
+        if (!thumb_jpeg_decode(dl.data, dl.len, &img)) goto done;
+    }
+
+    scaled = (unsigned char*)malloc((size_t)THUMB_IMG_W * (size_t)THUMB_IMG_H * 3u);
+    if (!scaled) goto done;
+    thumb_crop_resize(&img, scaled);
+
+    /* A disk hit is already encoded; only a fresh download needs writing back. */
+    if (!fromDisk && thumb_jpeg_encode(scaled, &jpg, &jpgLen)) {
+        LightLock_Lock(&g_thumbDiskLock);
+        thumb_write_atomic(path, jpg, (size_t)jpgLen);
+        LightLock_Unlock(&g_thumbDiskLock);
+    }
+
+    thumb_swizzle_rgb565(scaled, THUMB_IMG_W, THUMB_IMG_H, outSwizzled);
+    /* This thread dirtied the lines, so it flushes them; the main thread then needs no
+     * C3D_TexFlush when it adopts the buffer. */
+    GSPGPU_FlushDataCache(outSwizzled, THUMB_TEX_BYTES);
+    ok = true;
+
+done:
+    free(img.rgb);
+    free(scaled);
+    free(jpg);
+    free(dl.data);
+    free(file);
+    return ok;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Pool bookkeeping (main thread unless noted)                               */
+/* -------------------------------------------------------------------------- */
+
+static bool thumb_is_wanted(int id) {
+    for (int i = 0; i < g_thumbWantN; i++) if (g_thumbWant[i] == id) return true;
+    return false;
+}
+
+static bool thumb_resident(int id) {
+    for (int i = 0; i < THUMB_SLOTS; i++) if (g_thumbSlot[i].modId == id) return true;
+    return false;
+}
+
+static bool thumb_failed(int id) {
+    for (int i = 0; i < THUMB_FAIL_RING; i++) if (g_thumbFail[i] == id) return true;
+    return false;
+}
+
+static void thumb_mark_failed(int id) {
+    if (id == 0 || thumb_failed(id)) return;
+    g_thumbFail[g_thumbFailPos] = id;
+    g_thumbFailPos = (g_thumbFailPos + 1) % THUMB_FAIL_RING;
+}
+
+static bool thumb_inflight(int id) {
+    for (int i = 0; i < THUMB_WORKERS; i++) if (g_thumbFlight[i] == id) return true;
+    return false;
+}
+
+/* Never evicts something currently on screen, which is what keeps a slot from being
+ * recycled out from under a draw. Guaranteed to find a victim while THUMB_SLOTS > 12. */
+static ThumbSlot *thumb_pick_slot() {
+    for (int i = 0; i < THUMB_SLOTS; i++) {
+        if (g_thumbSlot[i].modId == 0) return &g_thumbSlot[i];
+    }
+    ThumbSlot *best = nullptr;
+    for (int i = 0; i < THUMB_SLOTS; i++) {
+        ThumbSlot &s = g_thumbSlot[i];
+        if (thumb_is_wanted(s.modId)) continue;
+        if (!best || s.lastUsed < best->lastUsed) best = &s;
+    }
+    return best;
+}
+
+static void thumb_rebuild_want() {
+    g_thumbWantN = 0;
+    const int n = visible_count();
+    for (int i = 0; i < n && g_thumbWantN < CARDS_PER_PAGE; i++) {
+        const ModData &m = g_mods[(size_t)(g_winStart + i)];
+        if (m.Id != 0 && !m.ThumbnailUrl.empty()) g_thumbWant[g_thumbWantN++] = m.Id;
+    }
+}
+
+/* Caller holds g_thumbLock. Push order is priority order: the grid reads left-to-right,
+ * top-to-bottom, so that is the order the images fill in. */
+static void thumb_rebuild_queue() {
+    g_thumbQueueN = 0;
+    const int n = visible_count();
+    for (int i = 0; i < n && g_thumbQueueN < THUMB_QUEUE; i++) {
+        const ModData &m = g_mods[(size_t)(g_winStart + i)];
+        if (m.Id == 0 || m.ThumbnailUrl.empty()) continue;
+        if (m.ThumbnailUrl.size() >= THUMB_URL_MAX) continue;
+        if (thumb_resident(m.Id) || thumb_failed(m.Id) || thumb_inflight(m.Id)) continue;
+
+        ThumbReq &r = g_thumbQueue[g_thumbQueueN++];
+        r.id = m.Id;
+        memcpy(r.url, m.ThumbnailUrl.c_str(), m.ThumbnailUrl.size() + 1);
+    }
+}
+
+static void thumb_worker(void *arg) {
+    const int wi  = (int)(uintptr_t)arg;
+    ThumbPub &pub = g_thumbPub[wi];
+
+    CURL *curl = curl_easy_init();
+    if (curl) thumb_curl_configure(curl);
+
+    for (;;) {
+        /* Armed before the predicate is tested: clearing after a wait could swallow a
+         * signal raised in between and park this worker on a non-empty queue. */
+        LightEvent_Clear(&g_thumbWake);
+
+        ThumbReq req;
+        req.id     = 0;
+        req.url[0] = '\0';
+
+        LightLock_Lock(&g_thumbLock);
+        if (!g_thumbQuit.load() && g_thumbQueueN > 0) {
+            req = g_thumbQueue[0];
+            for (int i = 1; i < g_thumbQueueN; i++) g_thumbQueue[i - 1] = g_thumbQueue[i];
+            g_thumbQueueN--;
+            g_thumbFlight[wi] = req.id;      /* claimed in the same critical section */
+        }
+        LightLock_Unlock(&g_thumbLock);
+
+        if (g_thumbQuit.load()) break;
+        if (req.id == 0) {
+            /* g_thumbWake is shared and sticky, so another worker's Clear could in
+             * principle cost this one a wake-up; the timeout bounds that. */
+            LightEvent_WaitTimeout(&g_thumbWake, THUMB_IDLE_WAIT_NS);
+            continue;
+        }
+
+        const bool produced = thumb_produce(curl, req.id, req.url, pub.pixels);
+        if (g_thumbQuit.load()) break;
+
+        LightEvent_Clear(&pub.ack);          /* before publishing: no lost signal */
+        LightLock_Lock(&g_thumbLock);
+        pub.modId = req.id;
+        pub.ok    = produced;
+        pub.ready = true;
+        LightLock_Unlock(&g_thumbLock);
+
+        /* Wait for the main thread to take pub.pixels. Polling the real condition on a
+         * timeout rather than blocking on the event outright: a shutdown that signalled
+         * between the Clear above and here would otherwise park this thread forever, and
+         * threadJoin would never return. */
+        for (;;) {
+            LightEvent_WaitTimeout(&pub.ack, THUMB_IDLE_WAIT_NS);
+
+            LightLock_Lock(&g_thumbLock);
+            const bool taken = !pub.ready;
+            LightLock_Unlock(&g_thumbLock);
+
+            if (taken || g_thumbQuit.load()) break;
+        }
+        if (g_thumbQuit.load()) break;
+    }
+
+    LightLock_Lock(&g_thumbLock);
+    g_thumbFlight[wi] = 0;
+    LightLock_Unlock(&g_thumbLock);
+
+    if (curl) curl_easy_cleanup(curl);
+}
+
+/* Called immediately after C3D_FrameBegin(C3D_FRAME_SYNCDRAW). That matters: the previous
+ * frame's command list still holds the old buffer address, and SYNCDRAW has just waited
+ * for that queue to retire, so nothing is reading the buffer handed back as scratch. */
+static void thumbs_tick() {
+    if (!g_thumbReady) return;
+    g_thumbFrame++;
+
+    LightLock_Lock(&g_thumbLock);
+    thumb_rebuild_want();
+
+    for (int w = 0; w < THUMB_WORKERS; w++) {
+        ThumbPub &p = g_thumbPub[w];
+        if (!p.ready) continue;
+
+        if (!p.ok) {
+            thumb_mark_failed(p.modId);
+        } else if (thumb_is_wanted(p.modId) && !thumb_resident(p.modId)) {
+            ThumbSlot *s = thumb_pick_slot();
+            if (s) {
+                /* Zero-copy handoff, and the buffer count is conserved exactly. */
+                u16 *old    = static_cast<u16*>(s->tex.data);
+                s->tex.data = p.pixels;
+                p.pixels    = old;
+                s->modId    = p.modId;
+                s->lastUsed = g_thumbFrame;
+            }
+        }
+        /* else: scrolled away while it loaded -- drop it and recycle the buffer. */
+
+        g_thumbFlight[w] = 0;
+        p.ready = false;
+        LightEvent_Signal(&p.ack);
+    }
+
+    thumb_rebuild_queue();
+    const bool haveWork = (g_thumbQueueN > 0);
+    LightLock_Unlock(&g_thumbLock);
+
+    if (haveWork) LightEvent_Signal(&g_thumbWake);
+}
+
+static C3D_Tex *thumb_for_mod(int modId) {
+    if (!g_thumbReady || modId == 0) return nullptr;
+    for (int i = 0; i < THUMB_SLOTS; i++) {
+        if (g_thumbSlot[i].modId == modId) {
+            g_thumbSlot[i].lastUsed = g_thumbFrame;
+            return &g_thumbSlot[i].tex;
+        }
+    }
+    return nullptr;
+}
+
+static bool thumbs_init() {
+    if (g_thumbReady) return true;
+
+    mkdir_p(THUMBNAIL_CACHE_DIR);
+    thumb_build_subtex();
+
+    LightLock_Init(&g_thumbLock);
+    LightLock_Init(&g_thumbDiskLock);
+    LightEvent_Init(&g_thumbWake, RESET_STICKY);
+
+    /* All 16 textures are the same size and live for the whole session, so this is the
+     * only place any of them is allocated -- publishing later just swaps pointers. */
+    int slots = 0, pubs = 0;
+    for (; slots < THUMB_SLOTS; slots++) {
+        ThumbSlot &s = g_thumbSlot[slots];
+        if (!C3D_TexInit(&s.tex, THUMB_TEX_W, THUMB_TEX_H, GPU_RGB565)) break;
+        C3D_TexSetFilter(&s.tex, GPU_LINEAR, GPU_LINEAR);
+        memset(s.tex.data, 0, THUMB_TEX_BYTES);
+        C3D_TexFlush(&s.tex);
+        s.modId    = 0;
+        s.lastUsed = 0;
+    }
+    if (slots == THUMB_SLOTS) {
+        for (; pubs < THUMB_WORKERS; pubs++) {
+            ThumbPub &p = g_thumbPub[pubs];
+            p.pixels = static_cast<u16*>(linearAlloc(THUMB_TEX_BYTES));
+            if (!p.pixels) break;
+            LightEvent_Init(&p.ack, RESET_STICKY);
+            p.modId = 0;
+            p.ready = false;
+            p.ok    = false;
+            g_thumbFlight[pubs] = 0;
+        }
+    }
+
+    if (slots != THUMB_SLOTS || pubs != THUMB_WORKERS) {
+        for (int i = 0; i < slots; i++) C3D_TexDelete(&g_thumbSlot[i].tex);
+        for (int i = 0; i < pubs;  i++) linearFree(g_thumbPub[i].pixels);
+        memset(g_thumbSlot, 0, sizeof(g_thumbSlot));
+        memset(g_thumbPub,  0, sizeof(g_thumbPub));
+        return false;   /* browsing still works, cards just keep the placeholder */
+    }
+
+    g_thumbQuit.store(false);
+    g_thumbReady = true;
+
+    for (int w = 0; w < THUMB_WORKERS; w++) {
+        g_thumbThread[w] = threadCreate(thumb_worker, (void*)(uintptr_t)w,
+                                        WORKER_STACK_SIZE, WORKER_PRIORITY, -2, false);
+    }
+    return true;
+}
+
+static void thumbs_shutdown() {
+    if (!g_thumbReady) return;
+    g_thumbReady = false;
+
+    g_thumbQuit.store(true);
+    LightEvent_Signal(&g_thumbWake);
+    for (int w = 0; w < THUMB_WORKERS; w++) LightEvent_Signal(&g_thumbPub[w].ack);
+
+    for (int w = 0; w < THUMB_WORKERS; w++) {
+        if (!g_thumbThread[w]) continue;
+        threadJoin(g_thumbThread[w], U64_MAX);
+        threadFree(g_thumbThread[w]);
+        g_thumbThread[w] = nullptr;
+    }
+    for (int w = 0; w < THUMB_WORKERS; w++) {
+        if (!g_thumbPub[w].pixels) continue;
+        linearFree(g_thumbPub[w].pixels);
+        g_thumbPub[w].pixels = nullptr;
+    }
+    for (int i = 0; i < THUMB_SLOTS; i++) {
+        C3D_TexDelete(&g_thumbSlot[i].tex);
+        g_thumbSlot[i].modId = 0;
+    }
+}
+
 /* Loads the fetched list and hands control to the browser. */
 static bool enter_browse_state() {
     load_installed_mods();
@@ -1768,6 +2541,9 @@ static bool enter_browse_state() {
     g_winStart = 0;
     g_selIdx   = 0;
     sort_mods();
+
+    /* Started here rather than earlier so the fetch pool has already released g_curlShare. */
+    thumbs_init();
     return true;
 }
 
@@ -1824,8 +2600,15 @@ static void draw_mod_card(int slot, const ModData& mod, bool selected) {
     const float cy = y + CARD_BORDER;
     C2D_DrawRectSolid(cx, cy, 0.0f, CONTENT_W, CONTENT_H, selected ? CLR_SEL_BG : CLR_BG);
 
-    /* Thumbnail placeholder; real image loading drops in here later. */
-    C2D_DrawRectSolid(cx, cy, 0.0f, CONTENT_W, THUMB_H, CLR_THUMB);
+    /* Resident thumbnail, or the placeholder while it loads / if it never arrives --
+     * the original shows nothing in both of those cases too. */
+    C3D_Tex *thumb = thumb_for_mod(mod.Id);
+    if (thumb) {
+        C2D_Image thumbImg = { thumb, &g_thumbSubTex };
+        C2D_DrawImageAt(thumbImg, cx, cy, 0.0f, nullptr, 1.0f, 1.0f);
+    } else {
+        C2D_DrawRectSolid(cx, cy, 0.0f, CONTENT_W, THUMB_H, CLR_THUMB);
+    }
 
     if (slot >= g_cardTextCount) return;
     const CardText& ct = g_cardText[slot];
@@ -2216,6 +2999,10 @@ int main(int argc, char **argv) {
 
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
+        /* Adopt any freshly decoded thumbnails. Must sit here: SYNCDRAW has just waited
+         * out the previous frame's queue, so no buffer being recycled is still in use. */
+        thumbs_tick();
+
         // Top screen: the mod grid, drawn straight through citro2d
         C2D_TargetClear(top, clrClear);
         C2D_SceneBegin(top);
@@ -2241,6 +3028,10 @@ int main(int argc, char **argv) {
         threadJoin(fetchThread, U64_MAX);
         threadFree(fetchThread);
     }
+
+    /* Before curl_global_cleanup (the workers hold easy handles) and before C2D_Fini
+     * (the slots hold live textures). */
+    thumbs_shutdown();
 
     curl_global_cleanup();
     sslcExit();
