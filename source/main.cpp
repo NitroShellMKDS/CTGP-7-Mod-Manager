@@ -8,6 +8,11 @@
 #include <setjmp.h>
 #include <jpeglib.h>
 
+/* Safe after <3ds.h>: libctru's 3ds/archive.h exports only archiveMount*, and the
+ * archive_read/archive_seek symbols in its devoptab object are file-local. */
+#include <archive.h>
+#include <archive_entry.h>
+
 #include <algorithm>
 #include <cfloat>
 #include <cinttypes>
@@ -85,6 +90,12 @@ static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[
 /* Lives outside CACHE_DIR: the fetcher wipes the cache on every launch, but the
  * record of what the user has installed has to survive that. */
 #define INSTALLED_FILE  APP_DIR "installed_mods.json"
+#define INSTALLED_TMP   APP_DIR "installed_mods.json.tmp"
+
+/* Staging file for a mod download. Outside CTGP7_DIR so a partial archive is never
+ * visible to CTGP-7, and a fixed name because only one install runs at a time -- each
+ * install unlinks it up front, so a leftover from a crash self-heals. */
+#define DOWNLOAD_TMP    CACHE_DIR "download.tmp"
 
 /* -------------------------------------------------------------------------- */
 /*  Audio (libvorbisidec + NDSP)                                              */
@@ -191,6 +202,15 @@ static constexpr float HINT2_Y      = 210.0f;
 
 /* The action label wraps instead of being cut to a fixed character count, so names like
  * "Mario Kart DS Character Pack (Wave 3)" show in full. */
+/* Install progress bar, in the free band between the action and uninstall buttons
+ * (action ends at 106, uninstall starts at 114). */
+static constexpr float PROG_BAR_Y   = 108.0f;
+static constexpr float PROG_BAR_H   =   4.0f;
+
+/* An install error replaces both hint lines rather than needing space of its own. */
+static constexpr float MSG_LINE_Y   = 168.0f;
+static constexpr int   MSG_MAX_LINES =   3;
+
 static constexpr float BTN_TEXT_PAD = 8.0f;
 static constexpr float BTN_ROUNDING = 5.0f;
 static constexpr int   BTN_MAX_LINES = 2;   /* 2 x 16px fits inside the 44px button */
@@ -241,6 +261,18 @@ enum ModAction { ACTION_NONE, ACTION_INSTALL, ACTION_UPDATE, ACTION_INSTALLED };
 static LightLock status_lock;
 static std::string g_statusText = "Initializing...";
 static bool g_fetchDone = false;
+
+/* libctru translates every path-taking call on sdmc:/romfs: (fopen, unlink, rename,
+ * mkdir, stat, opendir) through two process-global scratch buffers -- __ctru_dev_path_buf
+ * and __ctru_dev_utf16_buf -- and takes no lock of its own while doing it. Two threads
+ * doing filesystem work at once can therefore corrupt each other's path. Reads and writes
+ * on an already-open handle carry no path and are safe.
+ *
+ * So every path-taking call in this program goes through this lock. It is recursive
+ * because the wrapped helpers call each other (init_paths -> mkdir_p,
+ * install_extract -> thumb-style write helpers) and LightLock is not re-entrant.
+ * Initialised at the very top of main(), before any thread exists. */
+static RecursiveLock g_sdPathLock;
 
 /* -------------------------------------------------------------------------- */
 /*  Browser state (main thread only -- never touched by the fetch thread)      */
@@ -308,7 +340,19 @@ static void print_status(const char* format, ...) {
 /*  Filesystem helpers                                                        */
 /* -------------------------------------------------------------------------- */
 
+/* Scoped hold on g_sdPathLock. Every path-taking call in this file is wrapped by one of
+ * these, at the leaf, so callers never have to remember. */
+struct SdPathGuard {
+    SdPathGuard()  { RecursiveLock_Lock(&g_sdPathLock);   }
+    ~SdPathGuard() { RecursiveLock_Unlock(&g_sdPathLock); }
+private:
+    SdPathGuard(const SdPathGuard&);
+    SdPathGuard& operator=(const SdPathGuard&);
+};
+
 static int rmrf(const char *path) {
+    SdPathGuard sd;
+
     std::vector<std::string> stack;
     stack.push_back(path);
 
@@ -359,6 +403,8 @@ static int rmrf(const char *path) {
 }
 
 static bool mkdir_p(const char *path) {
+    SdPathGuard sd;
+
     std::string buf = path;
     const size_t prefix_len = std::string("sdmc:/").length();
     const size_t start_idx  = (buf.find("sdmc:/") == 0) ? prefix_len : 0;
@@ -692,7 +738,11 @@ static bool write_mods_json(const std::string& filename, const std::vector<ModDa
         }
     }
 
-    int res = json_object_to_file_ext(filename.c_str(), jarray, JSON_C_TO_STRING_NOSLASHESCAPE);
+    int res;
+    {
+        SdPathGuard sd;
+        res = json_object_to_file_ext(filename.c_str(), jarray, JSON_C_TO_STRING_NOSLASHESCAPE);
+    }
     json_object_put(jarray);
     return (res >= 0);
 }
@@ -701,7 +751,11 @@ static bool write_mods_json(const std::string& filename, const std::vector<ModDa
 static bool read_mods_json(const char *filename, std::vector<ModData>& out) {
     out.clear();
 
-    json_object *root = json_object_from_file(filename);
+    json_object *root;
+    {
+        SdPathGuard sd;
+        root = json_object_from_file(filename);
+    }
     if (!root) return false;
     if (json_object_get_type(root) != json_type_array) {
         json_object_put(root);
@@ -739,7 +793,14 @@ static bool read_mods_json(const char *filename, std::vector<ModData>& out) {
 static bool load_installed_mods() {
     g_installed.clear();
 
-    json_object *root = json_object_from_file(INSTALLED_FILE);
+    json_object *root;
+    {
+        SdPathGuard sd;
+        root = json_object_from_file(INSTALLED_FILE);
+        /* Crashed between the unlink and the rename in save_installed_mods: the tmp is
+         * then the only complete copy. Mirrors StateService.TryLoad's fallback. */
+        if (!root) root = json_object_from_file(INSTALLED_TMP);
+    }
     if (!root) return true;                       /* absent: nothing installed yet */
     if (json_object_get_type(root) != json_type_object) {
         json_object_put(root);
@@ -775,6 +836,13 @@ static bool load_installed_mods() {
     }
 
     json_object_put(root);
+
+    /* A stale tmp survived a crash but the real file loaded fine -- drop it, exactly as
+     * StateService.TryLoad does, so the fallback above stays unambiguous. */
+    {
+        SdPathGuard sd;
+        unlink(INSTALLED_TMP);
+    }
     return true;
 }
 
@@ -812,8 +880,22 @@ static bool save_installed_mods() {
         if (!json_add(root, std::to_string(it->first).c_str(), jrec)) { ok = false; break; }
     }
 
+    /* Write to a tmp and swap it in. This is the only record of what is on the card, and
+     * load_installed_mods() cannot tell a truncated file from an absent one -- so a
+     * half-written save would silently reset the whole install database. The window for
+     * that is real on a 3DS: lid close, HOME, or APT termination mid-write. */
     if (ok) {
-        ok = (json_object_to_file_ext(INSTALLED_FILE, root, JSON_C_TO_STRING_NOSLASHESCAPE) >= 0);
+        SdPathGuard sd;
+        ok = (json_object_to_file_ext(INSTALLED_TMP, root, JSON_C_TO_STRING_NOSLASHESCAPE) >= 0);
+        if (ok) {
+            unlink(INSTALLED_FILE);      /* 3DS rename() fails if the target exists */
+            if (rename(INSTALLED_TMP, INSTALLED_FILE) != 0) {
+                unlink(INSTALLED_TMP);
+                ok = false;
+            }
+        } else {
+            unlink(INSTALLED_TMP);
+        }
     }
     json_object_put(root);
     return ok;
@@ -1255,7 +1337,14 @@ static ov_callbacks g_ovCbs{ogg_read_cb, ogg_seek_cb, ogg_close_cb, ogg_tell_cb}
 
 static bool load_ogg(const char *path, OggVorbis_File *ovf) {
     ov_clear(ovf);
-    FILE *f = fopen(path, "rb");
+
+    /* The audio thread reopens loop.ogg mid-session, concurrently with SD work on other
+     * threads -- and romfs: shares libctru's global path buffers with sdmc:. */
+    FILE *f;
+    {
+        SdPathGuard sd;
+        f = fopen(path, "rb");
+    }
     if (!f) return false;
     int rc = ov_open_callbacks(f, ovf, nullptr, 0, g_ovCbs);
     if (rc < 0) { fclose(f); return false; }
@@ -1710,59 +1799,706 @@ static u32 nav_repeat(u32 kDown, u32 kHeld, float dt) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Install actions (placeholders)                                            */
+/*  Install: download + extract                                               */
 /* -------------------------------------------------------------------------- */
 
-/* Stands in for download + extract: records the mod as installed so the browse, sort
- * and uninstall paths can be exercised, and writes nothing to CTGP7_DIR.
- * NOTE: `mod` points into g_mods, which the re-sort below reorders -- everything read
- * from it must be read before that call. */
-static void fake_install(const ModData& mod) {
-    const int id = mod.Id;
+static constexpr const char *CHPACK_SUFFIX = ".chpack";   /* AppConfig.ModMemberSuffix */
+
+static constexpr size_t  INSTALL_NAME_MAX        = 128;
+static constexpr int     INSTALL_MAX_FILES       = 64;
+static constexpr int     INSTALL_MAX_ENTRIES     = 20000;
+static constexpr int64_t INSTALL_MAX_FILE_BYTES  = 64  * 1024 * 1024;
+static constexpr int64_t INSTALL_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+static constexpr size_t  ARCHIVE_BLOCK_SIZE      = 64 * 1024;
+
+static constexpr curl_off_t DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
+static constexpr long    DL_CONNECT_TIMEOUT    = 20L;
+static constexpr long    DL_LOW_SPEED_LIMIT    = 1024L;   /* bytes/sec ...      */
+static constexpr long    DL_LOW_SPEED_TIME     = 30L;     /* ... for this long  */
+
+static constexpr size_t  INSTALL_STACK_SIZE    = 256 * 1024;   /* libarchive + mbedTLS */
+static constexpr s64     INSTALL_IDLE_WAIT_NS  = 50000000LL;
+
+/* ASCII-only, deliberately not tolower(): tolower() on a negative char is undefined and
+ * locale folding is wrong for filenames. Matches C#'s StringComparison.OrdinalIgnoreCase. */
+static char ascii_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+static bool ascii_ends_with_ci(const char *s, const char *suffix) {
+    if (!s || !suffix) return false;
+    const size_t ls = strlen(s), lf = strlen(suffix);
+    if (lf > ls) return false;
+    const char *tail = s + (ls - lf);
+    for (size_t i = 0; i < lf; i++) {
+        if (ascii_lower(tail[i]) != ascii_lower(suffix[i])) return false;
+    }
+    return true;
+}
+
+static bool ascii_iequals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (ascii_lower(a[i]) != ascii_lower(b[i])) return false;
+    }
+    return true;
+}
+
+/* Reduces an archive entry name to a safe bare filename, or "" meaning skip it.
+ * This is Path.GetFileName + ExtractFullPath=false, hardened -- entry names come from a
+ * public mod site, so they are attacker-controlled. */
+static std::string sanitize_entry_name(const char *raw) {
+    if (!raw || !raw[0]) return std::string();
+
+    /* Both separators. The ZIP spec says '/', but archives written by Windows tools do
+     * contain '\\', and stripping only '/' would let "..\\..\\boot.firm" through whole. */
+    const char *base = raw;
+    for (const char *p = raw; *p; p++) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+
+    const std::string name(base);
+    if (name.empty()) return std::string();               /* trailing separator = a directory */
+    if (name == "." || name == "..") return std::string();
+    if (name.size() > INSTALL_NAME_MAX) return std::string();
+
+    for (size_t i = 0; i < name.size(); i++) {
+        const unsigned char c = (unsigned char)name[i];
+        /* ':' matters even with no separator left: "C:evil" is drive-relative, and
+         * "sdmc:" is itself a devoptab prefix. The rest is the FAT-illegal set. */
+        if (c < 0x20 || c == 0x7F) return std::string();
+        if (c == ':' || c == '*' || c == '?' || c == '"' ||
+            c == '<' || c == '>' || c == '|') return std::string();
+    }
+    return name;
+}
+
+/* UniversalExtractor gates on the extension of LatestFileName before doing any work, so
+ * an unsupported mod costs nothing. */
+static bool install_ext_supported(const std::string& fileName) {
+    return ascii_ends_with_ci(fileName.c_str(), ".zip")
+        || ascii_ends_with_ci(fileName.c_str(), ".7z")
+        || ascii_ends_with_ci(fileName.c_str(), ".rar");
+}
+
+/* ---- worker-visible signals (defined before the helpers that poll them) ---- */
+static std::atomic<bool>    g_instQuit(false);
+static std::atomic<bool>    g_instCancel(false);
+static std::atomic<int>     g_instPct(-1);
+static std::atomic<int64_t> g_instBytes(0);
+
+static bool install_aborting() { return g_instQuit.load() || g_instCancel.load(); }
+
+struct ExtractOut {
+    std::vector<std::string> files;
+    char                     message[192] = {};
+};
+
+static void set_msg(char *dst, size_t cap, const char *text) {
+    snprintf(dst, cap, "%s", text);
+}
+
+static void set_archive_msg(struct archive *a, char *dst, size_t cap, const char *what) {
+    const char *detail = a ? archive_error_string(a) : nullptr;
+    if (detail && detail[0]) snprintf(dst, cap, "%s: %s", what, detail);
+    else                     snprintf(dst, cap, "%s.", what);
+}
+
+static bool write_zeros(FILE *f, int64_t count) {
+    char zeros[512];
+    memset(zeros, 0, sizeof(zeros));
+    while (count > 0) {
+        const size_t chunk = (count > (int64_t)sizeof(zeros)) ? sizeof(zeros) : (size_t)count;
+        if (fwrite(zeros, 1, chunk, f) != chunk) return false;
+        count -= (int64_t)chunk;
+    }
+    return true;
+}
+
+/* Extracts every *.chpack member into CTGP7_DIR. Returns the number written; 0 means
+ * nothing matched or an error occurred (out->message says which).
+ *
+ * -fno-exceptions: one cleanup label, every local declared before the first goto. */
+static int install_extract(const char *archivePath, ExtractOut *out) {
+    struct archive       *a       = nullptr;
+    struct archive_entry *entry   = nullptr;
+    FILE                 *f       = nullptr;
+    int64_t               total   = 0;
+    int                   entries = 0;
+    int                   r       = ARCHIVE_OK;
+    std::string           name;
+    char                  dst[320];
+    char                  part[336];
+
+    a = archive_read_new();
+    if (!a) { set_msg(out->message, sizeof(out->message), "Out of memory."); goto cleanup; }
+
+    /* Exactly the three container formats, and no stream filters: their compression lives
+     * inside the container, so there is nothing for a filter to bid on. This also keeps
+     * every other reader (tar/cpio/iso/...) and every filter out of the linked binary. */
+    archive_read_support_format_zip(a);
+    archive_read_support_format_7zip(a);
+    archive_read_support_format_rar(a);    /* RAR 1.5 - 4.x */
+    archive_read_support_format_rar5(a);   /* RAR 5.0+      */
+
+    {
+        /* open() and fstat() happen inside this call; every later read uses the fd, which
+         * carries no path -- so this one guard covers the whole extract. */
+        SdPathGuard sd;
+        r = archive_read_open_filename(a, archivePath, ARCHIVE_BLOCK_SIZE);
+    }
+    if (r != ARCHIVE_OK) {
+        set_archive_msg(a, out->message, sizeof(out->message), "Cannot open archive");
+        goto cleanup;
+    }
+
+    for (;;) {
+        if (install_aborting()) { set_msg(out->message, sizeof(out->message), "Cancelled."); goto cleanup; }
+        if (++entries > INSTALL_MAX_ENTRIES) {
+            set_msg(out->message, sizeof(out->message), "Archive has too many entries.");
+            goto cleanup;
+        }
+
+        r = archive_read_next_header(a, &entry);
+        if (r == ARCHIVE_EOF) break;
+        if (r == ARCHIVE_RETRY) continue;
+        /* ARCHIVE_WARN is negative but the data is still valid, so the bail test is
+         * "< ARCHIVE_WARN", never "< ARCHIVE_OK". */
+        if (r < ARCHIVE_WARN) {
+            set_archive_msg(a, out->message, sizeof(out->message), "Archive error");
+            goto cleanup;
+        }
+
+        if (archive_entry_filetype(entry) != AE_IFREG) continue;   /* dirs, links, devices */
+        if (archive_entry_is_encrypted(entry)) {
+            set_msg(out->message, sizeof(out->message), "Archive is password protected.");
+            goto cleanup;
+        }
+
+        {
+            /* The 3DS locale is "C", so the non-UTF-8 accessor can return NULL for a name
+             * it cannot transcode. Ask for UTF-8 first. */
+            const char *raw = archive_entry_pathname_utf8(entry);
+            if (!raw) raw = archive_entry_pathname(entry);
+            if (!raw) continue;
+            if (!ascii_ends_with_ci(raw, CHPACK_SUFFIX)) continue;
+            name = sanitize_entry_name(raw);
+        }
+        if (name.empty()) continue;
+
+        /* FAT is case-insensitive, so two entries differing only in case are one file. */
+        {
+            bool dupe = false;
+            for (size_t i = 0; i < out->files.size(); i++) {
+                if (ascii_iequals(out->files[i], name)) { dupe = true; break; }
+            }
+            if (dupe) continue;
+        }
+        if ((int)out->files.size() >= INSTALL_MAX_FILES) {
+            set_msg(out->message, sizeof(out->message), "Archive has too many .chpack files.");
+            goto cleanup;
+        }
+
+        snprintf(dst,  sizeof(dst),  "%s%s",      CTGP7_DIR, name.c_str());
+        snprintf(part, sizeof(part), "%s%s.part", CTGP7_DIR, name.c_str());
+
+        {
+            SdPathGuard sd;
+            f = fopen(part, "wb");
+        }
+        if (!f) { set_msg(out->message, sizeof(out->message), "Cannot write to the SD card."); goto cleanup; }
+
+        {
+            int64_t want = 0;   /* next logical offset we have written */
+            for (;;) {
+                const void *blk    = nullptr;
+                size_t      blkLen = 0;
+                la_int64_t  blkOff = 0;
+
+                r = archive_read_data_block(a, &blk, &blkLen, &blkOff);
+                if (r == ARCHIVE_EOF) { r = ARCHIVE_OK; break; }
+                if (r < ARCHIVE_WARN) {
+                    set_archive_msg(a, out->message, sizeof(out->message), "Extract failed");
+                    goto cleanup;
+                }
+                if (blkLen == 0) continue;
+                if (install_aborting()) { set_msg(out->message, sizeof(out->message), "Cancelled."); goto cleanup; }
+
+                /* Sparse entries jump forward. FAT does not guarantee that a gap made by
+                 * seeking past EOF reads back as zeros, so fill it explicitly. */
+                if ((int64_t)blkOff < want) {
+                    set_msg(out->message, sizeof(out->message), "Corrupt archive entry.");
+                    goto cleanup;
+                }
+                if ((int64_t)blkOff > want) {
+                    if (!write_zeros(f, (int64_t)blkOff - want)) {
+                        set_msg(out->message, sizeof(out->message), "SD write failed.");
+                        goto cleanup;
+                    }
+                    want = (int64_t)blkOff;
+                }
+
+                want  += (int64_t)blkLen;
+                total += (int64_t)blkLen;
+                if (want > INSTALL_MAX_FILE_BYTES || total > INSTALL_MAX_TOTAL_BYTES) {
+                    set_msg(out->message, sizeof(out->message), "Archive is too large.");
+                    goto cleanup;
+                }
+                if (fwrite(blk, 1, blkLen, f) != blkLen) {
+                    set_msg(out->message, sizeof(out->message), "SD write failed (card full?).");
+                    goto cleanup;
+                }
+                g_instBytes.store(total);
+            }
+        }
+
+        if (fclose(f) != 0) {
+            f = nullptr;
+            set_msg(out->message, sizeof(out->message), "SD write failed.");
+            goto cleanup;
+        }
+        f = nullptr;
+
+        {
+            /* Swap the finished file in, so a truncated .chpack is never visible to
+             * CTGP-7. rename() on the 3DS fails if the target exists. */
+            SdPathGuard sd;
+            unlink(dst);
+            if (rename(part, dst) != 0) {
+                unlink(part);
+                set_msg(out->message, sizeof(out->message), "Cannot replace the installed file.");
+                goto cleanup;
+            }
+        }
+        out->files.push_back(name);
+    }
+
+    archive_read_free(a);
+    return (int)out->files.size();
+
+cleanup:
+    if (f) {
+        fclose(f);
+        SdPathGuard sd;
+        unlink(part);
+    }
+    if (a) archive_read_free(a);
+    out->files.clear();
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Install: streaming download                                               */
+/* -------------------------------------------------------------------------- */
+
+struct DownloadSink {
+    FILE      *f       = nullptr;
+    curl_off_t written = 0;
+};
+
+static size_t install_write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
+    DownloadSink *sink = static_cast<DownloadSink*>(userp);
+    const size_t total = size * nmemb;
+    if (total == 0) return 0;
+
+    if (sink->written > DOWNLOAD_MAX_BYTES - (curl_off_t)total) return CURL_WRITEFUNC_ERROR;
+    if (fwrite(contents, 1, total, sink->f) != total)           return CURL_WRITEFUNC_ERROR;
+    sink->written += (curl_off_t)total;
+    return total;
+}
+
+/* libcurl calls this about once a second even on an idle connection, so shutdown and
+ * cancel latency are both bounded at roughly that. */
+static int install_xferinfo_cb(void*, curl_off_t dltotal, curl_off_t dlnow,
+                               curl_off_t, curl_off_t) {
+    if (install_aborting()) return 1;   /* -> CURLE_ABORTED_BY_CALLBACK */
+
+    /* dltotal is 0 on the redirect leg and whenever Content-Length is absent. Publish -1
+     * there rather than a percentage that would jump backwards when the CDN leg starts. */
+    g_instPct.store(dltotal > 0 ? (int)((dlnow * 100) / dltotal) : -1);
+    g_instBytes.store((int64_t)dlnow);
+    return 0;
+}
+
+static void install_curl_configure(CURL *curl) {
+    curl_configure(curl);
+
+    /* curl_configure attaches g_curlShare, which the fetch thread destroys once the
+     * listing finishes -- same reasoning as thumb_curl_configure. */
+    curl_easy_setopt(curl, CURLOPT_SHARE, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, install_write_cb);
+
+    /* Archives are already compressed, and transparent gunzip would make dltotal report
+     * the encoded size, which would make the progress readout lie. */
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, nullptr);
+
+    /* The inherited 45s TIMEOUT is a wall-clock cap on the whole transfer, which would
+     * kill every large download over 3DS Wi-Fi. Replace it with a stall detector: a slow
+     * but live transfer runs as long as it needs, a dead socket is dropped in 30s. */
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, DL_CONNECT_TIMEOUT);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, DL_LOW_SPEED_LIMIT);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,  DL_LOW_SPEED_TIME);
+
+    /* Rejected before a byte of body arrives when Content-Length is present; the write
+     * callback's own counter covers chunked responses. */
+    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)DOWNLOAD_MAX_BYTES);
+
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, install_xferinfo_cb);
+}
+
+/* LatestFileUrl is gamebanana.com/dl/<id>, which 302s to a CDN; FOLLOWLOCATION is already
+ * set by curl_configure. Returns true only on a complete 2xx transfer. */
+static bool install_download(CURL *curl, const std::string& url, char *msg, size_t msgLen) {
+    DownloadSink sink;
+    CURLcode     res  = CURLE_OK;
+    long         code = 0;
+    curl_off_t   reported = 0;
+
+    {
+        SdPathGuard sd;
+        unlink(DOWNLOAD_TMP);
+        sink.f = fopen(DOWNLOAD_TMP, "wb");
+    }
+    if (!sink.f) { set_msg(msg, msgLen, "Cannot write to the SD card."); return false; }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, nullptr);
+    res = curl_easy_perform(curl);
+
+    const bool closed = (fclose(sink.f) == 0);
+    sink.f = nullptr;
+
+    if (res != CURLE_OK) {
+        if (res == CURLE_ABORTED_BY_CALLBACK)      set_msg(msg, msgLen, "Cancelled.");
+        else if (res == CURLE_OPERATION_TIMEDOUT)  set_msg(msg, msgLen, "Download stalled.");
+        else if (res == CURLE_WRITE_ERROR)         set_msg(msg, msgLen, "Download too large, or the card is full.");
+        else snprintf(msg, msgLen, "Download failed: %s", curl_easy_strerror(res));
+        return false;
+    }
+    if (!closed) { set_msg(msg, msgLen, "SD write failed."); return false; }
+
+    /* Reports the LAST response, so a CDN 403 after a good 302 is caught here. */
+    if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code) != CURLE_OK ||
+        code < 200 || code >= 300) {
+        snprintf(msg, msgLen, "Server returned HTTP %ld.", code);
+        return false;
+    }
+    /* Rather than trust that libcurl suppressed the 3xx bodies, check the arithmetic. */
+    if (curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &reported) == CURLE_OK &&
+        reported != sink.written) {
+        set_msg(msg, msgLen, "Download was interrupted.");
+        return false;
+    }
+    if (sink.written <= 0) { set_msg(msg, msgLen, "The server sent an empty file."); return false; }
+    return true;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Install: worker                                                           */
+/* -------------------------------------------------------------------------- */
+
+enum InstallPhase { INSTALL_IDLE = 0, INSTALL_DOWNLOADING, INSTALL_EXTRACTING, INSTALL_FINISHING };
+enum InstallSlot  { SLOT_EMPTY = 0, SLOT_REQUESTED, SLOT_RUNNING, SLOT_COMPLETE };
+
+/* Copied by value. Never a const ModData*: selected_mod() points into g_mods, and any
+ * re-sort invalidates it -- keying by Id is what lets sorting stay live during an install. */
+struct InstallReq {
+    int         modId    = 0;
+    int64_t     fileDate = 0;
+    std::string url;
+    std::string sourceName;
+};
+
+struct InstallRes {
+    int                      modId    = 0;
+    int64_t                  fileDate = 0;
+    std::string              sourceName;
+    std::vector<std::string> files;
+    bool                     ok = false;
+    char                     message[192] = {};
+};
+
+static LightLock       g_instLock;
+static LightEvent      g_instWake;
+static Thread          g_instThread   = nullptr;
+static InstallSlot     g_instSlot     = SLOT_EMPTY;
+static InstallReq      g_instReq;
+static InstallRes      g_instRes;
+static std::atomic<int> g_instPhase(INSTALL_IDLE);
+static bool            g_instReady    = false;   /* main thread only */
+static std::string     g_installMsg;             /* main thread only */
+
+static void install_worker(void*) {
+    CURL *curl = curl_easy_init();
+    if (curl) install_curl_configure(curl);
+
+    for (;;) {
+        /* Armed before the predicate is tested; this is the only Clear in the design. */
+        LightEvent_Clear(&g_instWake);
+
+        InstallReq req;
+        bool       have = false;
+
+        LightLock_Lock(&g_instLock);
+        if (!g_instQuit.load() && g_instSlot == SLOT_REQUESTED) {
+            req        = g_instReq;
+            g_instSlot = SLOT_RUNNING;
+            have       = true;
+        }
+        LightLock_Unlock(&g_instLock);
+
+        if (g_instQuit.load()) break;
+        if (!have) { LightEvent_WaitTimeout(&g_instWake, INSTALL_IDLE_WAIT_NS); continue; }
+
+        InstallRes res;
+        res.modId      = req.modId;
+        res.fileDate   = req.fileDate;
+        res.sourceName = req.sourceName;
+
+        g_instPhase.store(INSTALL_DOWNLOADING);
+        g_instPct.store(-1);
+        g_instBytes.store(0);
+
+        if (!curl) {
+            set_msg(res.message, sizeof(res.message), "Network is unavailable.");
+        } else if (install_download(curl, req.url, res.message, sizeof(res.message))) {
+            g_instPhase.store(INSTALL_EXTRACTING);
+            g_instPct.store(-1);
+            g_instBytes.store(0);
+
+            ExtractOut out;
+            if (install_extract(DOWNLOAD_TMP, &out) > 0) {
+                res.files = out.files;
+                res.ok    = true;
+            } else if (out.message[0]) {
+                set_msg(res.message, sizeof(res.message), out.message);
+            } else {
+                set_msg(res.message, sizeof(res.message), "No .chpack files.");
+            }
+        }
+
+        /* Mirrors ActionAsync's finally: runs on every path, including cancel. */
+        {
+            SdPathGuard sd;
+            unlink(DOWNLOAD_TMP);
+        }
+
+        g_instPhase.store(INSTALL_FINISHING);
+
+        LightLock_Lock(&g_instLock);
+        g_instRes  = res;
+        g_instSlot = SLOT_COMPLETE;
+        LightLock_Unlock(&g_instLock);
+        /* No ack wait: the main thread owns the slot from here, and waiting on an event
+         * that a shutdown could have already consumed is exactly how a worker wedges. */
+    }
+
+    if (curl) curl_easy_cleanup(curl);
+}
+
+static bool install_busy() {
+    if (!g_instReady) return false;
+    LightLock_Lock(&g_instLock);
+    const bool busy = (g_instSlot == SLOT_REQUESTED || g_instSlot == SLOT_RUNNING);
+    LightLock_Unlock(&g_instLock);
+    return busy;
+}
+
+static void install_cancel() {
+    if (install_busy()) g_instCancel.store(true);
+}
+
+/* Queues an install/update. Everything the worker needs is copied here, on the main
+ * thread, while `mod` is still known good. */
+static bool install_begin(const ModData& mod) {
+    if (!g_instReady || install_busy()) return false;
+
+    if (mod.LatestFileUrl.empty()) { g_installMsg = "This mod has no download link."; return false; }
+    if (!install_ext_supported(mod.LatestFileName)) {
+        g_installMsg = "Unsupported archive type (only .zip, .7z and .rar).";
+        return false;
+    }
+
+    InstallReq req;
+    req.modId      = mod.Id;
+    req.fileDate   = mod.LatestFileDate;
+    req.url        = mod.LatestFileUrl;
+    req.sourceName = mod.LatestFileName;
+
+    g_instCancel.store(false);
+    g_instPct.store(-1);
+    g_instBytes.store(0);
+    g_instPhase.store(INSTALL_DOWNLOADING);
+    g_installMsg.clear();
+
+    LightLock_Lock(&g_instLock);
+    const bool free_slot = (g_instSlot == SLOT_EMPTY);
+    if (free_slot) {
+        g_instReq  = req;
+        g_instSlot = SLOT_REQUESTED;
+    }
+    LightLock_Unlock(&g_instLock);
+
+    if (free_slot) LightEvent_Signal(&g_instWake);
+    return free_slot;
+}
+
+/* Commits a finished install. Order matters: the previous version's leftovers are only
+ * swept once the new one is fully on disk, so a failed update can never destroy a
+ * working install. */
+static void install_apply(const InstallRes& res) {
+    std::map<int, InstallRecord>::iterator prev = g_installed.find(res.modId);
+    if (prev != g_installed.end()) {
+        for (size_t i = 0; i < prev->second.Files.size(); i++) {
+            const std::string& old = prev->second.Files[i];
+
+            /* Case-INSENSITIVE, because FAT is: "Mario.chpack" and "mario.chpack" are one
+             * file on the card, and a case-sensitive diff here would delete the file the
+             * update just wrote. */
+            bool still_supplied = false;
+            for (size_t k = 0; k < res.files.size(); k++) {
+                if (ascii_iequals(old, res.files[k])) { still_supplied = true; break; }
+            }
+            if (still_supplied) continue;
+
+            SdPathGuard sd;
+            unlink((std::string(CTGP7_DIR) + old).c_str());   /* failures ignored, as upstream */
+        }
+    }
 
     InstallRecord rec;
-    rec.Date           = mod.LatestFileDate;   /* matches InstallRecord(m.LatestFileDate, ...) */
-    rec.SourceFileName = mod.LatestFileName.empty() ? std::string("fake.zip") : mod.LatestFileName;
-    rec.Files.push_back(std::to_string(id) + ".chpack");
+    rec.Date           = res.fileDate;
+    rec.Files          = res.files;
+    rec.SourceFileName = res.sourceName;
+    g_installed[res.modId] = rec;
 
-    g_installed[id] = std::move(rec);
     save_installed_mods();
     resort_after_install_change();
 }
 
-/* Stands in for deleting the extracted .chpack files and dropping the record. */
-static void fake_uninstall(const ModData& mod) {
-    if (g_installed.erase(mod.Id) == 0) return;
-    save_installed_mods();
-    resort_after_install_change();
+/* Runs on the main thread before input is handled, and deliberately NOT next to
+ * thumbs_tick(): this mutates g_installed and re-sorts g_mods, which draw_bottom_browse()
+ * reads before C3D_FrameBegin and draw_top_screen() reads after. Applying a result
+ * between them would show one screen's old state against the other's new. */
+static void install_tick() {
+    if (!g_instReady) return;
+
+    InstallRes res;
+    bool have = false;
+
+    LightLock_Lock(&g_instLock);
+    if (g_instSlot == SLOT_COMPLETE) {
+        res        = g_instRes;
+        g_instRes  = InstallRes();
+        g_instSlot = SLOT_EMPTY;
+        have       = true;
+    }
+    LightLock_Unlock(&g_instLock);
+    if (!have) return;
+
+    g_instPhase.store(INSTALL_IDLE);
+    g_instCancel.store(false);
+
+    if (res.ok) {
+        install_apply(res);
+        g_installMsg.clear();
+    } else {
+        /* Leave g_installed untouched, exactly as ActionAsync's catch does: the old
+         * record still describes the old install, so uninstall and retry both work. */
+        g_installMsg = res.message[0] ? res.message : "Install failed.";
+    }
 }
 
-/* Test affordance with no counterpart upstream: rolls the recorded install date back so
- * the mod flips to "Update Available", making the third card state reachable without
- * hand-editing installed_mods.json. Retire it along with fake_install(). */
-static void fake_mark_outdated(const ModData& mod) {
-    std::map<int, InstallRecord>::iterator it = g_installed.find(mod.Id);
-    if (it == g_installed.end() || mod.LatestFileDate > it->second.Date) return;
-    it->second.Date = mod.LatestFileDate - 1;
-    save_installed_mods();
-    resort_after_install_change();
+static std::string install_progress_label() {
+    const int phase = g_instPhase.load();
+    if (phase == INSTALL_EXTRACTING) return "Extracting...";
+    if (phase == INSTALL_FINISHING)  return "Finishing...";
+
+    const int pct = g_instPct.load();
+    if (pct >= 0) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Downloading %d%%", pct < 100 ? pct : 100);
+        return std::string(buf);
+    }
+
+    const int64_t kb = g_instBytes.load() / 1024;
+    char buf[64];
+    if (kb >= 1024) snprintf(buf, sizeof(buf), "Downloading %.1f MB", (double)kb / 1024.0);
+    else            snprintf(buf, sizeof(buf), "Downloading %" PRId64 " KB", kb);
+    return std::string(buf);
+}
+
+static bool install_init() {
+    if (g_instReady) return true;
+
+    LightLock_Init(&g_instLock);
+    LightEvent_Init(&g_instWake, RESET_STICKY);
+    g_instQuit.store(false);
+    g_instCancel.store(false);
+    g_instSlot = SLOT_EMPTY;
+
+    /* Leftover from a crash mid-install. */
+    {
+        SdPathGuard sd;
+        unlink(DOWNLOAD_TMP);
+    }
+
+    g_instReady  = true;
+    g_instThread = threadCreate(install_worker, nullptr, INSTALL_STACK_SIZE,
+                                WORKER_PRIORITY, -2, false);
+    if (!g_instThread) { g_instReady = false; return false; }
+    return true;
+}
+
+static void install_shutdown() {
+    if (!g_instReady) return;
+    g_instReady = false;
+
+    g_instQuit.store(true);
+    LightEvent_Signal(&g_instWake);
+
+    if (g_instThread) {
+        threadJoin(g_instThread, U64_MAX);
+        threadFree(g_instThread);
+        g_instThread = nullptr;
+    }
+    SdPathGuard sd;
+    unlink(DOWNLOAD_TMP);
 }
 
 static void do_action() {
+    if (install_busy()) return;
     const ModData *mod = selected_mod();
     if (!mod) return;
     const ModAction action = current_action();
-    if (action == ACTION_INSTALL || action == ACTION_UPDATE) fake_install(*mod);
+    if (action == ACTION_INSTALL || action == ACTION_UPDATE) install_begin(*mod);
 }
 
+/* A handful of unlinks, so it stays on the main thread. Mirrors
+ * StateService.UninstallAsync: drop the record, save, then delete the files. */
 static void do_uninstall() {
-    const ModData *mod = selected_mod();
-    if (mod && g_installed.count(mod->Id) != 0) fake_uninstall(*mod);
-}
+    if (install_busy()) return;
 
-static void do_simulate_update() {
     const ModData *mod = selected_mod();
-    if (mod) fake_mark_outdated(*mod);
+    if (!mod) return;
+
+    std::map<int, InstallRecord>::iterator it = g_installed.find(mod->Id);
+    if (it == g_installed.end()) return;
+
+    const std::vector<std::string> files = it->second.Files;
+    g_installed.erase(it);
+    save_installed_mods();
+
+    for (size_t i = 0; i < files.size(); i++) {
+        SdPathGuard sd;
+        unlink((std::string(CTGP7_DIR) + files[i]).c_str());   /* failures ignored */
+    }
+
+    g_installMsg.clear();
+    resort_after_install_change();
 }
 
 /* Changing the sort re-sorts the whole list and jumps back to the top, the way
@@ -1837,7 +2573,6 @@ static int               g_thumbWantN   = 0;
 static u32               g_thumbFrame   = 0;
 static bool              g_thumbReady   = false;
 static LightLock         g_thumbLock;
-static LightLock         g_thumbDiskLock;   /* SD access is serial anyway */
 static LightEvent        g_thumbWake;
 static std::atomic<bool> g_thumbQuit(false);
 static Tex3DS_SubTexture g_thumbSubTex;
@@ -2108,6 +2843,8 @@ static void thumb_cache_path(int modId, char *out, size_t outLen) {
 }
 
 static bool thumb_read_file(const char *path, unsigned char **out, size_t *outLen) {
+    SdPathGuard sd;
+
     FILE *f = fopen(path, "rb");
     if (!f) return false;
 
@@ -2132,6 +2869,8 @@ static bool thumb_read_file(const char *path, unsigned char **out, size_t *outLe
 }
 
 static bool thumb_write_atomic(const char *path, const void *data, size_t len) {
+    SdPathGuard sd;
+
     char tmp[THUMB_PATH_MAX + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 
@@ -2204,18 +2943,17 @@ static bool thumb_produce(CURL *curl, int modId, const char *url, u16 *outSwizzl
 
     thumb_cache_path(modId, path, sizeof(path));
 
-    LightLock_Lock(&g_thumbDiskLock);
     const bool haveFile = thumb_read_file(path, &file, &fileLen);
-    LightLock_Unlock(&g_thumbDiskLock);
 
     if (haveFile) {
         if (thumb_jpeg_decode(file, fileLen, &img)) {
             fromDisk = true;
         } else {
             /* Corrupt cache entry: drop it and refetch, as the original's catch does. */
-            LightLock_Lock(&g_thumbDiskLock);
-            unlink(path);
-            LightLock_Unlock(&g_thumbDiskLock);
+            {
+                SdPathGuard sd;
+                unlink(path);
+            }
         }
         free(file);
         file = nullptr;
@@ -2241,9 +2979,7 @@ static bool thumb_produce(CURL *curl, int modId, const char *url, u16 *outSwizzl
 
     /* A disk hit is already encoded; only a fresh download needs writing back. */
     if (!fromDisk && thumb_jpeg_encode(scaled, &jpg, &jpgLen)) {
-        LightLock_Lock(&g_thumbDiskLock);
         thumb_write_atomic(path, jpg, (size_t)jpgLen);
-        LightLock_Unlock(&g_thumbDiskLock);
     }
 
     thumb_swizzle_rgb565(scaled, THUMB_IMG_W, THUMB_IMG_H, outSwizzled);
@@ -2457,7 +3193,6 @@ static bool thumbs_init() {
     thumb_build_subtex();
 
     LightLock_Init(&g_thumbLock);
-    LightLock_Init(&g_thumbDiskLock);
     LightEvent_Init(&g_thumbWake, RESET_STICKY);
 
     /* All 16 textures are the same size and live for the whole session, so this is the
@@ -2544,6 +3279,7 @@ static bool enter_browse_state() {
 
     /* Started here rather than earlier so the fetch pool has already released g_curlShare. */
     thumbs_init();
+    install_init();
     return true;
 }
 
@@ -2786,13 +3522,18 @@ static void draw_bottom_browse() {
         ImVec2(BTN_X, SEP_Y), ImVec2(BTN_X + BTN_W, SEP_Y + 2.0f),
         IM_COL32(0x2A, 0x3B, 0x47, 0xFF));
 
+    const bool busy = install_busy();
+
     /* --- Action button ------------------------------------------------------- */
     {
         const ModAction   action = current_action();
-        const std::string label  = action_label(action, selected_mod());
+        /* Matches ActionButtonText = "Working..." upstream, but with progress: on a 3DS
+         * this takes minutes, not the second it takes on a desktop. */
+        const std::string label  = busy ? install_progress_label()
+                                        : action_label(action, selected_mod());
         const ImVec4&     fg     = (action == ACTION_UPDATE) ? IM_AMBER : IM_GOLD;
 
-        ImGui::BeginDisabled(action != ACTION_INSTALL && action != ACTION_UPDATE);
+        ImGui::BeginDisabled(busy || (action != ACTION_INSTALL && action != ACTION_UPDATE));
         if (wrapped_button("##action", label, ACTION_BTN_Y, ACTION_BTN_H,
                            IM_BTN_BG, IM_BTN_HOT, fg, 2.0f)) {
             do_action();
@@ -2800,12 +3541,27 @@ static void draw_bottom_browse() {
         ImGui::EndDisabled();
     }
 
+    /* --- Progress bar, in the gap between the buttons ------------------------- */
+    if (busy) {
+        const int   pct = g_instPct.load();
+        ImDrawList *dl  = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(ImVec2(BTN_X, PROG_BAR_Y),
+                          ImVec2(BTN_X + BTN_W, PROG_BAR_Y + PROG_BAR_H),
+                          IM_COL32(0x2A, 0x3B, 0x47, 0xFF));
+        if (pct > 0) {   /* pct < 0 means unknown: leave the track empty rather than lie */
+            const float w = BTN_W * (float)(pct < 100 ? pct : 100) / 100.0f;
+            dl->AddRectFilled(ImVec2(BTN_X, PROG_BAR_Y),
+                              ImVec2(BTN_X + w, PROG_BAR_Y + PROG_BAR_H),
+                              ImGui::GetColorU32(IM_GOLD));
+        }
+    }
+
     /* --- Uninstall button ---------------------------------------------------- */
     {
         /* Re-read: installing above may have re-sorted the page under us. The original
          * hides this button outright; here it stays put and greys out instead. */
         const ModData *mod = selected_mod();
-        const bool can_uninstall = mod && g_installed.count(mod->Id) != 0;
+        const bool can_uninstall = !busy && mod && g_installed.count(mod->Id) != 0;
 
         ImGui::BeginDisabled(!can_uninstall);
         if (wrapped_button("##uninstall", "Uninstall", UNINST_BTN_Y, UNINST_BTN_H,
@@ -2815,7 +3571,7 @@ static void draw_bottom_browse() {
         ImGui::EndDisabled();
     }
 
-    /* --- Position readout and button hints ----------------------------------- */
+    /* --- Position readout ----------------------------------------------------- */
     {
         char buf[48];
         const int total = mod_count();
@@ -2823,19 +3579,48 @@ static void draw_bottom_browse() {
         snprintf(buf, sizeof(buf), "%d / %d", cur, total);
         imgui_text_centered(buf, IM_AUTHOR, COUNTER_Y);
     }
-    imgui_text_centered("[A] Install   [B] Uninstall   [X] Sort", IM_AUTHOR, HINT1_Y);
-    imgui_text_centered("[Y] Sim. update   [START] Exit", IM_AUTHOR, HINT2_Y);
+
+    /* --- Error message, or the button hints ----------------------------------- */
+    if (!g_installMsg.empty()) {
+        /* The hints are exactly what the user does not need while reading an error, so
+         * the message takes their space instead of needing geometry of its own. */
+        std::vector<std::string> lines;
+        wrap_lines(g_installMsg, BOT_W - 16.0f, MSG_MAX_LINES, lines);
+
+        float y = MSG_LINE_Y;
+        for (size_t i = 0; i < lines.size(); i++) {
+            imgui_text_centered(lines[i].c_str(), IM_ERROR, y);
+            y += ImGui::GetTextLineHeight() + 2.0f;
+        }
+    } else {
+        imgui_text_centered("[A] Install   [B] Uninstall   [X] Sort", IM_AUTHOR, HINT1_Y);
+        imgui_text_centered(busy ? "[B] Cancel   [START] Exit" : "[START] Exit",
+                            IM_AUTHOR, HINT2_Y);
+    }
 
     ImGui::End();
 }
 
 static void handle_browse_input(u32 navKeys, u32 kDown) {
     handle_nav(navKeys);
+    if (navKeys) g_installMsg.clear();
+
+    /* The keys are an input route independent of the buttons, so they need their own
+     * gate -- ImGui::BeginDisabled only blocks touch. */
+    if (install_busy()) {
+        /* B cancels rather than uninstalls while working: the uninstall button is
+         * disabled anyway, and a stalled download would otherwise have no escape short
+         * of quitting the app. */
+        if (kDown & KEY_B) install_cancel();
+        /* Sorting stays live -- it only reorders g_mods, and the running request was
+         * copied by value and is keyed by mod Id. */
+        if (kDown & KEY_X) set_sort_mode(!g_sortByName);
+        return;
+    }
 
     if (kDown & KEY_A) do_action();
     if (kDown & KEY_B) do_uninstall();
     if (kDown & KEY_X) set_sort_mode(!g_sortByName);
-    if (kDown & KEY_Y) do_simulate_update();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2847,6 +3632,7 @@ int main(int argc, char **argv) {
     (void)argv;
 
     LightLock_Init(&status_lock);
+    RecursiveLock_Init(&g_sdPathLock);   /* before anything can touch the filesystem */
 
     gfxInitDefault();
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -2983,6 +3769,9 @@ int main(int argc, char **argv) {
         if (done && (kDown & KEY_START)) break;
 
         if (g_appState == STATE_BROWSING) {
+            /* Settle any finished install first, so input this frame sees the new state
+             * and both screens render the same one. */
+            install_tick();
             handle_browse_input(nav_repeat(kDown, kHeld, dt), kDown);
         }
 
@@ -3032,6 +3821,7 @@ int main(int argc, char **argv) {
     /* Before curl_global_cleanup (the workers hold easy handles) and before C2D_Fini
      * (the slots hold live textures). */
     thumbs_shutdown();
+    install_shutdown();
 
     curl_global_cleanup();
     sslcExit();
