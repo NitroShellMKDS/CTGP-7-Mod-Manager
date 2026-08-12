@@ -51,7 +51,7 @@ AccessControlInfo:
 
   IoAccessControl:
     - UseSdif3
-    - UseCardSpi
+    #- UseCardSpi
     #- FsMountNand
     #- FsMountNandRoWrite
     #- FsMountWnand
@@ -73,8 +73,7 @@ AccessControlInfo:
   CanShareDeviceMemory          : true
   RunnableOnSleep               : false
   SpecialMemoryArrange          : true
-
-  SystemModeExt                 : Legacy
+  SystemModeExt                 : 124MB
   CpuSpeed                      : 804MHz
   EnableL2Cache                 : true
   CanAccessCore2                : true
@@ -197,12 +196,13 @@ AccessControlInfo:
     - fs:USER
     - soc:U
     - ssl:C
+    - ac:u
+    - dsp::DSP
     - apt:U
     - gsp::Gpu
     - gsp::Lcd
     - hid:USER
-    #- APT:U
-    #- ac:u
+    #- ndm:u
     #- am:net
     #- boss:U
     #- cam:u
@@ -223,13 +223,12 @@ SystemControlInfo:
   StackSize: 0x40000
 
   Dependency:
-    fs: 0x0004013000001702
-    soc: 0x0004013000002e02
-    ssl: 0x0004013000002f02
-    apt: 0x0004013000001502
+    ac: 0x0004013000002402
+    dsp: 0x0004013000001a02
     gsp: 0x0004013000001c02
     hid: 0x0004013000001d02
-    #ac: 0x0004013000002402
+    socket: 0x0004013000002e02
+    ssl: 0x0004013000002f02
     #am: 0x0004013000001502
     #boss: 0x0004013000003402
     #camera: 0x0004013000001602
@@ -238,11 +237,8 @@ SystemControlInfo:
     #codec: 0x0004013000001802
     #csnd: 0x0004013000002702
     #dlp: 0x0004013000002802
-    #dsp: 0x0004013000001a02
     #friends: 0x0004013000003202
     #gpio: 0x0004013000001b02
-    #gsp: 0x0004013000001c02
-    #hid: 0x0004013000001d02
     #http: 0x0004013000002902
     #i2c: 0x0004013000001e02
     #ir: 0x0004013000003302
@@ -258,6 +254,4 @@ SystemControlInfo:
     #ptm: 0x0004013000002202
     #qtm: 0x0004013020004202
     #ro: 0x0004013000003702
-    #socket: 0x0004013000002e02
     #spi: 0x0004013000002302
-    #ssl: 0x0004013000002f02

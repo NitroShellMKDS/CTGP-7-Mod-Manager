@@ -1886,6 +1886,7 @@ static std::atomic<bool>    g_instQuit(false);
 static std::atomic<bool>    g_instCancel(false);
 static std::atomic<int>     g_instPct(-1);
 static std::atomic<int64_t> g_instBytes(0);
+static std::atomic<int>     g_instFiles(0);   /* .chpack files written so far */
 
 static bool install_aborting() { return g_instQuit.load() || g_instCancel.load(); }
 
@@ -1904,6 +1905,24 @@ static void set_archive_msg(struct archive *a, char *dst, size_t cap, const char
     else                     snprintf(dst, cap, "%s.", what);
 }
 
+/* Extraction progress, measured in raw bytes consumed from the archive rather than in
+ * entries. That is the only measure that works for every format: sizing or counting the
+ * entries up front would mean a second pass, and for a solid archive a second pass means
+ * decompressing the whole thing twice. It also advances while non-matching entries are
+ * being skipped, so the bar never sits still. */
+static void install_extract_progress(struct archive *a, int64_t archiveBytes, size_t files) {
+    g_instFiles.store(static_cast<int>(files));
+    if (archiveBytes <= 0) return;
+
+    const la_int64_t done = archive_filter_bytes(a, -1);
+    if (done < 0) return;
+
+    int pct = static_cast<int>((static_cast<int64_t>(done) * 100) / archiveBytes);
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    g_instPct.store(pct);
+}
+
 static bool write_zeros(FILE *f, int64_t count) {
     char zeros[512];
     memset(zeros, 0, sizeof(zeros));
@@ -1920,15 +1939,24 @@ static bool write_zeros(FILE *f, int64_t count) {
  *
  * -fno-exceptions: one cleanup label, every local declared before the first goto. */
 static int install_extract(const char *archivePath, ExtractOut *out) {
-    struct archive       *a       = nullptr;
-    struct archive_entry *entry   = nullptr;
-    FILE                 *f       = nullptr;
-    int64_t               total   = 0;
-    int                   entries = 0;
-    int                   r       = ARCHIVE_OK;
+    struct archive       *a            = nullptr;
+    struct archive_entry *entry        = nullptr;
+    FILE                 *f            = nullptr;
+    int64_t               total        = 0;
+    int64_t               archiveBytes = 0;
+    int                   entries      = 0;
+    int                   r            = ARCHIVE_OK;
+    bool                  already      = false;
     std::string           name;
+    struct stat           st;
     char                  dst[320];
     char                  part[336];
+
+    /* Denominator for the progress readout; 0 just means "unknown", not an error. */
+    {
+        SdPathGuard sd;
+        if (stat(archivePath, &st) == 0 && st.st_size > 0) archiveBytes = (int64_t)st.st_size;
+    }
 
     a = archive_read_new();
     if (!a) { set_msg(out->message, sizeof(out->message), "Out of memory."); goto cleanup; }
@@ -1969,6 +1997,9 @@ static int install_extract(const char *archivePath, ExtractOut *out) {
             goto cleanup;
         }
 
+        /* Keeps the bar moving across entries we skip, which in a big pack is most of them. */
+        install_extract_progress(a, archiveBytes, out->files.size());
+
         if (archive_entry_filetype(entry) != AE_IFREG) continue;   /* dirs, links, devices */
         if (archive_entry_is_encrypted(entry)) {
             set_msg(out->message, sizeof(out->message), "Archive is password protected.");
@@ -1986,15 +2017,17 @@ static int install_extract(const char *archivePath, ExtractOut *out) {
         }
         if (name.empty()) continue;
 
-        /* FAT is case-insensitive, so two entries differing only in case are one file. */
-        {
-            bool dupe = false;
-            for (size_t i = 0; i < out->files.size(); i++) {
-                if (ascii_iequals(out->files[i], name)) { dupe = true; break; }
-            }
-            if (dupe) continue;
+        /* Two entries can share a basename ("a/x.chpack" and "b/x.chpack"). Extract both
+         * and let the later one win -- that is what ExtractionOptions.Overwrite = true
+         * does upstream. Only the *record* is deduplicated: FAT is case-insensitive, so
+         * they are one file on the card and listing it twice would make uninstall try the
+         * same unlink twice. Skipping the entry outright (as this used to) silently
+         * dropped a .chpack the archive genuinely contained. */
+        already = false;
+        for (size_t i = 0; i < out->files.size(); i++) {
+            if (ascii_iequals(out->files[i], name)) { already = true; break; }
         }
-        if ((int)out->files.size() >= INSTALL_MAX_FILES) {
+        if (!already && (int)out->files.size() >= INSTALL_MAX_FILES) {
             set_msg(out->message, sizeof(out->message), "Archive has too many .chpack files.");
             goto cleanup;
         }
@@ -2049,6 +2082,7 @@ static int install_extract(const char *archivePath, ExtractOut *out) {
                     goto cleanup;
                 }
                 g_instBytes.store(total);
+                install_extract_progress(a, archiveBytes, out->files.size());
             }
         }
 
@@ -2070,7 +2104,8 @@ static int install_extract(const char *archivePath, ExtractOut *out) {
                 goto cleanup;
             }
         }
-        out->files.push_back(name);
+        if (!already) out->files.push_back(name);
+        install_extract_progress(a, archiveBytes, out->files.size());
     }
 
     archive_read_free(a);
@@ -2268,6 +2303,7 @@ static void install_worker(void*) {
             g_instPhase.store(INSTALL_EXTRACTING);
             g_instPct.store(-1);
             g_instBytes.store(0);
+            g_instFiles.store(0);
 
             ExtractOut out;
             if (install_extract(DOWNLOAD_TMP, &out) > 0) {
@@ -2331,6 +2367,7 @@ static bool install_begin(const ModData& mod) {
     g_instCancel.store(false);
     g_instPct.store(-1);
     g_instBytes.store(0);
+    g_instFiles.store(0);
     g_instPhase.store(INSTALL_DOWNLOADING);
     g_installMsg.clear();
 
@@ -2414,7 +2451,21 @@ static void install_tick() {
 
 static std::string install_progress_label() {
     const int phase = g_instPhase.load();
-    if (phase == INSTALL_EXTRACTING) return "Extracting...";
+
+    if (phase == INSTALL_EXTRACTING) {
+        const int pct   = g_instPct.load();
+        const int files = g_instFiles.load();
+        char buf[64];
+        if (pct < 0) {
+            snprintf(buf, sizeof(buf), "Extracting...");
+        } else if (files > 0) {
+            snprintf(buf, sizeof(buf), "Extracting %d%%  (%d file%s)",
+                     pct, files, files == 1 ? "" : "s");
+        } else {
+            snprintf(buf, sizeof(buf), "Extracting %d%%", pct);
+        }
+        return std::string(buf);
+    }
     if (phase == INSTALL_FINISHING)  return "Finishing...";
 
     const int pct = g_instPct.load();
