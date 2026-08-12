@@ -42,8 +42,6 @@ static constexpr u64    RETRY_BASE_DELAY_NS     = 500000000ULL;
 static constexpr u64    INTER_CATEGORY_DELAY_NS = 200000000ULL;
 static constexpr u64    BATCH_ERROR_SLEEP_NS    = 700000000ULL;
 static constexpr u64    POST_FETCH_DELAY_NS     = 1500000000ULL;
-static constexpr u32    MAX_MODS_PER_PAGE       = 6;
-static constexpr u32    ROWS_PER_PAGE           = 2;
 
 static constexpr int CATEGORIES[] = {
     35931, 10605, 35932, 35943, 35933, 35935, 35937, 35938,
@@ -62,7 +60,6 @@ static constexpr size_t NUM_CATEGORIES = sizeof(CATEGORIES) / sizeof(CATEGORIES[
 #define MOD_LIST_FILE   LISTS_DIR "modlist.json"
 #define BY_NAME_FILE    LISTS_DIR "byname.json"
 #define BY_UPDATED_FILE LISTS_DIR "byupdated.json"
-#define LOG_FILE        APP_DIR   "output.log"
 
 /* -------------------------------------------------------------------------- */
 /*  Data Structures & Globals for Rendering                                   */
@@ -88,20 +85,6 @@ static LightLock status_lock;
 static std::string g_statusText = "Initializing...";
 static bool g_fetchDone = false;
 static bool g_fetchSuccess = false;
-static FILE* g_logFile = nullptr;
-
-// wraps ModData and holds a texture loaded from ThumbnailUrl
-struct UIModData {
-    ModData     Mod;
-    C2D_Image   Thumbnail;
-};
-
-// static storage for top screen selection
-struct _UIState {
-    UIModData   Entries[MAX_MODS_PER_PAGE]   = {};
-    u32         CurrentIndex                 = 0;
-};
-static _UIState UIState;
 
 /* -------------------------------------------------------------------------- */
 /*  Logging (Thread-Safe)                                                     */
@@ -116,8 +99,6 @@ static void print_status(const char* format, ...) {
 
     LightLock_Lock(&status_lock);
     g_statusText = buffer;
-    std::cout << buffer << std::endl;
-    fprintf(g_logFile, "%s\n", buffer);
     LightLock_Unlock(&status_lock);
 }
 
@@ -563,14 +544,15 @@ static void fetch_thread_func(void* arg) {
             write_mods_json(BY_UPDATED_FILE, all_mods);
 
             fetch_succeeded = (enriched > 0);
-            print_status("Enriched %zu/%zu mods.", enriched, all_mods.size());
+            print_status("Done! Enriched %zu/%zu mods.", enriched, all_mods.size());
         } else {
             print_status("Failed to fetch any mods!");
         }
     }
 
     svcSleepThread(POST_FETCH_DELAY_NS);
-    print_status("Use control pad to change selection");
+    print_status("Press START to exit.");
+
     curl_easy_cleanup(curl);
 
 exit_thread:
@@ -587,8 +569,6 @@ exit_thread:
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
-
-    g_logFile = fopen(LOG_FILE, "w");
 
     LightLock_Init(&status_lock);
 
@@ -650,41 +630,9 @@ main_loop:
         hidScanInput();
         u32 kDown = hidKeysDown();
 
-        // mod selection
-        // won't read multiple inputs at a time due to integer-wise comparison,
-        // useful for key combos but might feel "odd"
-        switch (kDown) {
-        case KEY_DLEFT:
-            // wrap horizontally
-            if (!((UIState.CurrentIndex) % (MAX_MODS_PER_PAGE/ROWS_PER_PAGE)))
-                UIState.CurrentIndex += MAX_MODS_PER_PAGE/ROWS_PER_PAGE;
-            UIState.CurrentIndex--;
-            break;
-        case KEY_DRIGHT:
-            // wrap horizontally
-            if (!((UIState.CurrentIndex+1) % (MAX_MODS_PER_PAGE/ROWS_PER_PAGE)))
-                UIState.CurrentIndex -= MAX_MODS_PER_PAGE/ROWS_PER_PAGE;
-            UIState.CurrentIndex++;
-            break;
-        case KEY_DUP:
-            // wrap vertically
-            UIState.CurrentIndex -= MAX_MODS_PER_PAGE/ROWS_PER_PAGE;
-            if (UIState.CurrentIndex >= MAX_MODS_PER_PAGE)
-                UIState.CurrentIndex += MAX_MODS_PER_PAGE;
-            break;
-        case KEY_DDOWN:
-            // wrap vertically
-            UIState.CurrentIndex += MAX_MODS_PER_PAGE/ROWS_PER_PAGE;
-            if (UIState.CurrentIndex >= MAX_MODS_PER_PAGE)
-                UIState.CurrentIndex -= MAX_MODS_PER_PAGE;
-            break;
-        }
-
-        //if (kDown & (KEY_DLEFT|KEY_DRIGHT|KEY_DUP|KEY_DDOWN)) // debug
-        //    g_statusText = std::to_string(UIState.CurrentIndex);
-
         LightLock_Lock(&status_lock);
         bool done = g_fetchDone;
+        std::string currentText = g_statusText;
         LightLock_Unlock(&status_lock);
 
         if (done && (kDown & KEY_START)) break;
@@ -701,7 +649,7 @@ main_loop:
 
         C2D_TextBufClear(dynamicBuf);
         C2D_Text text;
-        C2D_TextParse(&text, dynamicBuf, g_statusText.c_str());
+        C2D_TextParse(&text, dynamicBuf, currentText.c_str());
         C2D_TextOptimize(&text);
 
         // The default system font height is approximately ~30px. 
@@ -710,10 +658,9 @@ main_loop:
         float textWidth, textHeight;
         C2D_TextGetDimensions(&text, scale, scale, &textWidth, &textHeight);
 
-        // Move this to the bottom to make room for interactive elements,
-        // we're not removing it because this log text is useful to monitor progress.
+        // Center on the 320x240 bottom screen
         float x = (320.0f - textWidth) / 2.0f;
-        float y = 240.0f - textHeight - 4.0f; //4px mgn
+        float y = (240.0f - textHeight) / 2.0f;
 
         // Simulate bold text by drawing it twice with a slight 1px horizontal offset
         C2D_DrawText(&text, C2D_WithColor, x + 1.0f, y, 0.5f, scale, scale, clrText);
@@ -740,6 +687,5 @@ main_loop:
     C3D_Fini();
     gfxExit();
 
-    fclose(g_logFile);
     return g_fetchSuccess ? 0 : 1;
 }
