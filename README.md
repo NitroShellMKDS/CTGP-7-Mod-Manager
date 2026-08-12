@@ -29,6 +29,7 @@ make
 
 * NitroShell – Original Idea and Project Lead, Music Assistance
 * bonkmaykr – CTGP-7 Mod Manager Logo, Music, Helper
+* Straky - Home Menu Icon
 * gameonion – CTGP-7 Logo
 
 ## Libraries & Tools

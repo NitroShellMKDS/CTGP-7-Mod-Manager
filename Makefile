@@ -30,8 +30,8 @@ APP_AUTHOR	:= NitroShell and Bonkmaykr
 
 TARGET		:= CTGP-7-Mod-Manager
 BUILD		:= build
-SOURCES		:= source imgui/imgui
-INCLUDES	:= include imgui
+SOURCES		:= source source/core source/backend source/frontend imgui/imgui
+INCLUDES	:= source imgui
 ROMFS		:= romfs
 
 #---------------------------------------------------------------------------------
