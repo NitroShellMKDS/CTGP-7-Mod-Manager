@@ -43,9 +43,9 @@ CFLAGS	:= -g -Wall -Wextra -Os -mword-relocations \
 		   $(ARCH)
 
 CFLAGS		+= $(INCLUDE) -D__3DS__
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11 -Wno-psabi
+CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++20 -Wno-psabi
 ASFLAGS		:= -g $(ARCH)
-LDFLAGS		:= -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
+LDFLAGS		:= -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections -Wl,-z,noexecstack
 
 LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljson-c -larchive -lbz2 -llzma -lzstd -ljpeg -lz -lcitro2d -lcitro3d -lctru -lm -lvorbisidec -logg
 LIBDIRS	:= $(PORTLIBS) $(CTRULIB)
@@ -77,7 +77,7 @@ export OFILES         := $(OFILES_BIN) $(OFILES_SOURCES)
 export HFILES         := $(PICAFILES:.v.pica=_shbin.h) $(SHLISTFILES:.shlist=_shbin.h)
 
 export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-		           $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+		           $(foreach dir,$(LIBDIRS),-isystem $(dir)/include) \
 		           -I$(CURDIR)/$(BUILD)
 export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 export _3DSXDEPS := $(if $(NO_SMDH),,$(OUTPUT).smdh)
