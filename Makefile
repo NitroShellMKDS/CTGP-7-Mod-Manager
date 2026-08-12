@@ -26,12 +26,12 @@ BNR_AUDIO	:= app/audio.wav
 ICON		:= app/icon.png
 
 APP_TITLE	:= CTGP-7 Mod Manager
-APP_AUTHOR	:= NitroShell and bonkmaykr
+APP_AUTHOR	:= NitroShell and Bonkmaykr
 
 TARGET		:= CTGP-7-Mod-Manager
 BUILD		:= build
-SOURCES		:= source deps/imgui-3ds/imgui deps/imgui-3ds/source
-INCLUDES	:= include deps/imgui-3ds/imgui deps/imgui-3ds/source
+SOURCES		:= source
+INCLUDES	:= include
 ROMFS		:= romfs
 
 #---------------------------------------------------------------------------------
@@ -134,10 +134,6 @@ $(OUTPUT).cia	: $(OUTPUT).elf $(OUTPUT).smdh
 	@$(BANNERTOOL) makesmdh -i "../app/icon.png" -s "$(TARGET)" -l "$(APP_TITLE)" -p "$(APP_AUTHOR)" -o "../app/icon.bin" \
 		--flags visible,ratingrequired --cero 153 --esrb 153 --usk 153 --pegigen 153 --pegiptr 153 --pegibbfc 153 --cob 153 --grb 153 --cgsrr 153
 	@$(MAKEROM) -f cia -target t -exefslogo -o "$(OUTPUT).cia" -elf "$(OUTPUT).elf" -rsf "../app/build-cia.rsf" -banner "../app/banner.bin" -icon "../app/icon.bin" -DAPP_ROMFS=".."
-
-%.shbin.o : %.v.pica %.g.pica
-	@echo $(notdir $^)
-	@$(call shader-as,$^)
 
 %.bin.o	%_bin.h : %.bin
 	@echo $(notdir $<)
