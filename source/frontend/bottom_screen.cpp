@@ -4,6 +4,7 @@
 #include "core/config.h"
 #include "core/format.h"
 #include "core/text.h"
+#include "core/log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -21,6 +22,7 @@ void text_centered(const char *content, const ImVec4 &color, float y) {
 }
 
 void bottom_status(const std::string &content, bool failed) {
+  log_event(content);
   ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
   ImGui::SetNextWindowSize(ImVec2(cfg::BOT_W, cfg::BOT_H));
   ImGui::Begin("##status", nullptr, cfg::SCREEN_WINDOW_FLAGS);

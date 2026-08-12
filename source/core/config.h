@@ -19,6 +19,7 @@ static_assert(sizeof(u16) == 2, "RGB565 texel packing assumes a 2-byte texel.");
 namespace mm {
 namespace cfg {
 
+// Why are we doing this????????? -bonk
 template <std::size_t N>
 struct StaticString {
   std::array<char, N + 1> chars{};
@@ -40,7 +41,7 @@ template <std::size_t N>
 [[nodiscard]] consteval StaticString<N - 1> lit(const char (&source)[N]) noexcept {
   StaticString<N - 1> out;
   for (std::size_t i = 0; i + 1 < N; ++i) {
-    out.chars[i] = source[i];
+    out.chars[i] = source[i]; // memcpy?
   }
   return out;
 }
@@ -89,6 +90,7 @@ inline constexpr auto CACHE_DIR = APP_DIR + lit("cache/");
 inline constexpr auto LISTS_DIR = CACHE_DIR + lit("lists/");
 inline constexpr auto THUMB_DIR = CACHE_DIR + lit("images/");
 inline constexpr auto CTGP7_DIR = BASE_DIR + lit("CTGP-7/MyStuff/Characters/");
+inline constexpr auto LOG_FILE = APP_DIR + lit("output.log");
 inline constexpr auto MOD_LIST_FILE = LISTS_DIR + lit("modlist.json");
 inline constexpr auto BY_NAME_FILE = LISTS_DIR + lit("byname.json");
 inline constexpr auto BY_UPDATED_FILE = LISTS_DIR + lit("byupdated.json");
