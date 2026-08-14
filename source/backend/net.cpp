@@ -44,12 +44,12 @@ std::size_t write_to_string(void *contents, std::size_t size, std::size_t nmemb,
 
 void configure(CURL *curl) noexcept {
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_to_string);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, cfg::USER_AGENT);
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, cfg::USER_AGENT.data());
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-  curl_easy_setopt(curl, CURLOPT_CAINFO, cfg::CA_BUNDLE_PATH);
+  curl_easy_setopt(curl, CURLOPT_CAINFO, cfg::CA_BUNDLE_PATH.data());
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
   curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);

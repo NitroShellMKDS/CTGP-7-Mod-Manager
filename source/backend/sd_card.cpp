@@ -134,10 +134,10 @@ sys::FileHandle open(const char *path, const char *mode) noexcept {
 }
 
 bool init_paths() {
-  return make_directories(cfg::APP_DIR.view()) &&
-         make_directories(cfg::LISTS_DIR.view()) &&
-         make_directories(cfg::THUMB_DIR.view()) &&
-         make_directories(cfg::CTGP7_DIR.view());
+  return make_directories(cfg::APP_DIR) &&
+         make_directories(cfg::LISTS_DIR) &&
+         make_directories(cfg::THUMB_DIR) &&
+         make_directories(cfg::CTGP7_DIR);
 }
 
 }  // namespace sd

@@ -69,8 +69,8 @@ void configure_download(CURL *curl) noexcept {
 }
 
 bool download(CURL *curl, const std::string &url, std::string &message) {
-  sd::unlink_quietly(cfg::DOWNLOAD_TMP.c_str());
-  sys::FileHandle file = sd::open(cfg::DOWNLOAD_TMP.c_str(), "wb");
+  sd::unlink_quietly(cfg::DOWNLOAD_TMP.data());
+  sys::FileHandle file = sd::open(cfg::DOWNLOAD_TMP.data(), "wb");
   if (!file) {
     message = "Cannot write to the SD card.";
     return false;
@@ -184,7 +184,7 @@ void worker_main(void *) {
       bytes_done.store(0, std::memory_order_relaxed);
       files_written.store(0, std::memory_order_relaxed);
       ExtractResult extracted;
-      if (extract(cfg::DOWNLOAD_TMP.c_str(), extracted) > 0) {
+      if (extract(cfg::DOWNLOAD_TMP.data(), extracted) > 0) {
         result.files = std::move(extracted.files);
         result.ok = true;
       } else if (!extracted.message.empty()) {
@@ -193,7 +193,7 @@ void worker_main(void *) {
         result.message = "No .chpack files.";
       }
     }
-    sd::unlink_quietly(cfg::DOWNLOAD_TMP.c_str());
+    sd::unlink_quietly(cfg::DOWNLOAD_TMP.data());
     phase.store(Phase::FINISHING, std::memory_order_relaxed);
     {
       const std::scoped_lock guard{mailbox_lock};
@@ -251,7 +251,7 @@ void apply(const Result &result) {
       if (still_supplied) {
         continue;
       }
-      const std::string path = fmt::format("{}{}", cfg::CTGP7_DIR.view(), old_file);
+      const std::string path = fmt::format("{}{}", cfg::CTGP7_DIR, old_file);
       sd::unlink_quietly(path.c_str());
     }
   }
@@ -356,7 +356,7 @@ void uninstall() {
   store::installed.erase(mod_id);
   (void)store::save_installed();
   for (const std::string &file : files) {
-    const std::string path = fmt::format("{}{}", cfg::CTGP7_DIR.view(), file);
+    const std::string path = fmt::format("{}{}", cfg::CTGP7_DIR, file);
     sd::unlink_quietly(path.c_str());
   }
   user_message.clear();
@@ -370,7 +370,7 @@ bool init() {
   quit_requested.store(false, std::memory_order_relaxed);
   cancel_requested.store(false, std::memory_order_relaxed);
   slot = Slot::EMPTY;
-  sd::unlink_quietly(cfg::DOWNLOAD_TMP.c_str());
+  sd::unlink_quietly(cfg::DOWNLOAD_TMP.data());
   worker = sys::Thread::spawn(&worker_main, nullptr, cfg::INSTALL_STACK_SIZE,
                               cfg::WORKER_PRIORITY, cfg::ANY_CORE);
   if (!worker) {
@@ -388,7 +388,7 @@ void shutdown() {
   quit_requested.store(true, std::memory_order_relaxed);
   wake.signal();
   worker.join();
-  sd::unlink_quietly(cfg::DOWNLOAD_TMP.c_str());
+  sd::unlink_quietly(cfg::DOWNLOAD_TMP.data());
 }
 
 }  // namespace install

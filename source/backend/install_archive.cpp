@@ -200,7 +200,7 @@ std::size_t extract(const char *archive_path, ExtractResult &out) {
       out.message = "Archive has too many .chpack files.";
       return 0;
     }
-    const std::string destination = fmt::format("{}{}", cfg::CTGP7_DIR.view(), name);
+    const std::string destination = fmt::format("{}{}", cfg::CTGP7_DIR, name);
     const std::string partial = destination + ".part";
     sys::FileHandle file = sd::open(partial.c_str(), "wb");
     if (!file) {

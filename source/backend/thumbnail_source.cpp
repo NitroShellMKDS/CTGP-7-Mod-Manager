@@ -229,7 +229,7 @@ void swizzle_rgb565(const unsigned char *source, int source_width, int source_he
 }
 
 std::string cache_path(int mod_id) {
-  return fmt::format("{}{}.jpg", cfg::THUMB_DIR.view(), mod_id);
+  return fmt::format("{}{}.jpg", cfg::THUMB_DIR, mod_id);
 }
 
 std::optional<Buffer> read_cached(const char *path) {

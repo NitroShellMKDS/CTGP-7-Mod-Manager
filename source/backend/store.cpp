@@ -76,9 +76,9 @@ bool read_mod_list(const char *path, std::vector<ModData> &out) {
 
 bool load_installed() {
   installed.clear();
-  sys::JsonRef root = js::read_file(cfg::INSTALLED_FILE.c_str());
+  sys::JsonRef root = js::read_file(cfg::INSTALLED_FILE.data());
   if (!root) {
-    root = js::read_file(cfg::INSTALLED_TMP.c_str());
+    root = js::read_file(cfg::INSTALLED_TMP.data());
   }
   if (!root) {
     return true;
@@ -108,7 +108,7 @@ bool load_installed() {
     }
     installed.insert_or_assign(*id, std::move(record));
   }
-  sd::unlink_quietly(cfg::INSTALLED_TMP.c_str());
+  sd::unlink_quietly(cfg::INSTALLED_TMP.data());
   return true;
 }
 
@@ -148,11 +148,11 @@ bool save_installed() {
     }
     (void)record.release();
   }
-  if (!js::write_file(cfg::INSTALLED_TMP.c_str(), root.get())) {
-    sd::unlink_quietly(cfg::INSTALLED_TMP.c_str());
+  if (!js::write_file(cfg::INSTALLED_TMP.data(), root.get())) {
+    sd::unlink_quietly(cfg::INSTALLED_TMP.data());
     return false;
   }
-  return sd::replace_file(cfg::INSTALLED_TMP.c_str(), cfg::INSTALLED_FILE.c_str());
+  return sd::replace_file(cfg::INSTALLED_TMP.data(), cfg::INSTALLED_FILE.data());
 }
 
 }  // namespace store

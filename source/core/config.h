@@ -19,51 +19,11 @@ static_assert(sizeof(u16) == 2, "RGB565 texel packing assumes a 2-byte texel.");
 namespace mm {
 namespace cfg {
 
-// Why are we doing this????????? -bonk
-template <std::size_t N>
-struct StaticString {
-  std::array<char, N + 1> chars{};
-
-  [[nodiscard]] constexpr const char *c_str() const noexcept {
-    return chars.data();
-  }
-
-  [[nodiscard]] constexpr std::string_view view() const noexcept {
-    return {chars.data(), N};
-  }
-
-  [[nodiscard]] static constexpr std::size_t size() noexcept {
-    return N;
-  }
-};
-
-template <std::size_t N>
-[[nodiscard]] consteval StaticString<N - 1> lit(const char (&source)[N]) noexcept {
-  StaticString<N - 1> out;
-  for (std::size_t i = 0; i + 1 < N; ++i) {
-    out.chars[i] = source[i]; // memcpy?
-  }
-  return out;
-}
-
-template <std::size_t A, std::size_t B>
-[[nodiscard]] consteval StaticString<A + B> operator+(const StaticString<A> &a,
-                                                      const StaticString<B> &b) noexcept {
-  StaticString<A + B> out;
-  for (std::size_t i = 0; i < A; ++i) {
-    out.chars[i] = a.chars[i];
-  }
-  for (std::size_t i = 0; i < B; ++i) {
-    out.chars[A + i] = b.chars[i];
-  }
-  return out;
-}
-
-inline constexpr const char *USER_AGENT = "CTGP-7-Mod-Manager/3.0";
-inline constexpr const char *API_V10_INDEX = "https://gamebanana.com/apiv10/Mod/Index";
-inline constexpr const char *API_CORE_DATA = "https://api.gamebanana.com/Core/Item/Data";
-inline constexpr const char *CA_BUNDLE_PATH = "romfs:/cacert.pem";
-inline constexpr const char *DOWNLOAD_BASE = "https://gamebanana.com/dl/";
+inline constexpr std::string_view USER_AGENT = "CTGP-7-Mod-Manager/3.0";
+inline constexpr std::string_view API_V10_INDEX = "https://gamebanana.com/apiv10/Mod/Index";
+inline constexpr std::string_view API_CORE_DATA = "https://api.gamebanana.com/Core/Item/Data";
+inline constexpr std::string_view CA_BUNDLE_PATH = "romfs:/cacert.pem";
+inline constexpr std::string_view DOWNLOAD_BASE = "https://gamebanana.com/dl/";
 
 inline constexpr std::size_t SOC_ALIGN = 0x1000;
 inline constexpr std::size_t SOC_BUFFERSIZE = 0x100000;
@@ -81,22 +41,22 @@ inline constexpr int MAX_PAGES_PER_CAT = 200;
 inline constexpr std::size_t CORE_BATCH_SIZE = 50;
 inline constexpr std::size_t RESPONSE_RESERVE = 64 * 1024;
 inline constexpr std::array<int, 18> CATEGORIES{35931, 10605, 35932, 35943, 35933, 35935,
-                                                35937, 35938, 35939, 35941, 35942, 35944,
-                                                35946, 35947, 35945, 35940, 35934, 35936};
+                                                 35937, 35938, 35939, 35941, 35942, 35944,
+                                                 35946, 35947, 35945, 35940, 35934, 35936};
 
-inline constexpr auto BASE_DIR = lit("sdmc:/");
-inline constexpr auto APP_DIR = BASE_DIR + lit("3ds/CTGP-7-Mod-Manager/");
-inline constexpr auto CACHE_DIR = APP_DIR + lit("cache/");
-inline constexpr auto LISTS_DIR = CACHE_DIR + lit("lists/");
-inline constexpr auto THUMB_DIR = CACHE_DIR + lit("images/");
-inline constexpr auto CTGP7_DIR = BASE_DIR + lit("CTGP-7/MyStuff/Characters/");
-inline constexpr auto LOG_FILE = APP_DIR + lit("output.log");
-inline constexpr auto MOD_LIST_FILE = LISTS_DIR + lit("modlist.json");
-inline constexpr auto BY_NAME_FILE = LISTS_DIR + lit("byname.json");
-inline constexpr auto BY_UPDATED_FILE = LISTS_DIR + lit("byupdated.json");
-inline constexpr auto INSTALLED_FILE = APP_DIR + lit("installed_mods.json");
-inline constexpr auto INSTALLED_TMP = APP_DIR + lit("installed_mods.json.tmp");
-inline constexpr auto DOWNLOAD_TMP = CACHE_DIR + lit("download.tmp");
+inline constexpr std::string_view BASE_DIR = "sdmc:/";
+inline constexpr std::string_view APP_DIR = "sdmc:/3ds/CTGP-7-Mod-Manager/";
+inline constexpr std::string_view CACHE_DIR = "sdmc:/3ds/CTGP-7-Mod-Manager/cache/";
+inline constexpr std::string_view LISTS_DIR = "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists/";
+inline constexpr std::string_view THUMB_DIR = "sdmc:/3ds/CTGP-7-Mod-Manager/cache/images/";
+inline constexpr std::string_view CTGP7_DIR = "sdmc:/CTGP-7/MyStuff/Characters/";
+inline constexpr std::string_view LOG_FILE = "sdmc:/3ds/CTGP-7-Mod-Manager/output.log";
+inline constexpr std::string_view MOD_LIST_FILE = "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists/modlist.json";
+inline constexpr std::string_view BY_NAME_FILE = "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists/byname.json";
+inline constexpr std::string_view BY_UPDATED_FILE = "sdmc:/3ds/CTGP-7-Mod-Manager/cache/lists/byupdated.json";
+inline constexpr std::string_view INSTALLED_FILE = "sdmc:/3ds/CTGP-7-Mod-Manager/installed_mods.json";
+inline constexpr std::string_view INSTALLED_TMP = "sdmc:/3ds/CTGP-7-Mod-Manager/installed_mods.json.tmp";
+inline constexpr std::string_view DOWNLOAD_TMP = "sdmc:/3ds/CTGP-7-Mod-Manager/cache/download.tmp";
 
 inline constexpr int AUDIO_BUF_SAMPLES = 4096;
 inline constexpr int AUDIO_MAX_CHANNELS = 2;

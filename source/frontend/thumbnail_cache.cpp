@@ -243,7 +243,7 @@ bool init() {
   if (ready) {
     return true;
   }
-  (void)sd::make_directories(cfg::THUMB_DIR.view());
+  (void)sd::make_directories(cfg::THUMB_DIR);
   build_sub_texture();
   std::size_t created = 0;
   for (; created < slots.size(); ++created) {

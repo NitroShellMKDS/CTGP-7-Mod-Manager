@@ -318,15 +318,15 @@ void run_pipeline() {
       std::ranges::count_if(all_mods, [](const ModData &mod) {
         return !mod.latest_file_url.empty();
       }));
-  if (!store::write_mod_list(cfg::MOD_LIST_FILE.c_str(), all_mods)) {
+  if (!store::write_mod_list(cfg::MOD_LIST_FILE.data(), all_mods)) {
     status::print("Error saving mod list!");
   }
   std::ranges::sort(all_mods, {}, &ModData::name);
-  if (!store::write_mod_list(cfg::BY_NAME_FILE.c_str(), all_mods)) {
+  if (!store::write_mod_list(cfg::BY_NAME_FILE.data(), all_mods)) {
     status::print("Warning: failed to write byname.json");
   }
   std::ranges::sort(all_mods, std::ranges::greater{}, &ModData::latest_file_date);
-  if (!store::write_mod_list(cfg::BY_UPDATED_FILE.c_str(), all_mods)) {
+  if (!store::write_mod_list(cfg::BY_UPDATED_FILE.data(), all_mods)) {
     status::print("Warning: failed to write byupdated.json");
   }
   const int failures = net::failed_requests.load(std::memory_order_relaxed);
@@ -339,7 +339,7 @@ void run_pipeline() {
 }
 
 void thread_main(void *) {
-  (void)sd::remove_tree(cfg::LISTS_DIR.view());
+  (void)sd::remove_tree(cfg::LISTS_DIR);
   (void)sd::init_paths();
   net::share_init();
   run_pipeline();

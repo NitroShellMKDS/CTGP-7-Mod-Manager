@@ -24,9 +24,9 @@ namespace app {
 bool enter_browse_state() {
   (void)store::load_installed();
   const char *preferred =
-      model::sort_by_name ? cfg::BY_NAME_FILE.c_str() : cfg::BY_UPDATED_FILE.c_str();
+      model::sort_by_name ? cfg::BY_NAME_FILE.data() : cfg::BY_UPDATED_FILE.data();
   if (!store::read_mod_list(preferred, model::mods) || model::mods.empty()) {
-    (void)store::read_mod_list(cfg::MOD_LIST_FILE.c_str(), model::mods);
+    (void)store::read_mod_list(cfg::MOD_LIST_FILE.data(), model::mods);
   }
   if (model::mods.empty()) {
     return false;
@@ -151,7 +151,7 @@ bool Platform::init_romfs() {
     return false;
   }
   romfs_ready_ = true;
-  if (!sd::exists(cfg::CA_BUNDLE_PATH)) {
+  if (!sd::exists(cfg::CA_BUNDLE_PATH.data())) {
     status::print("Fatal: CA bundle missing from ROMFS");
     return false;
   }
