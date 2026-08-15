@@ -182,19 +182,27 @@ void fetch_core_range(CURL *curl, std::span<ModData> mods) {
   }
   std::vector<ModData *> targets;
   targets.reserve(mods.size());
+  constexpr std::size_t MAX_URL_LENGTH = 4096;
   std::string url{cfg::API_CORE_DATA};
   url += '?';
   for (ModData &mod : mods) {
     if (!mod.latest_file_url.empty()) {
       continue;
     }
-    url += fmt::format("itemtype[]=Mod&itemid[]={}&fields[]=Files().aFiles()&", mod.id);
+    const std::string part =
+        fmt::format("itemtype[]=Mod&itemid[]={}&fields[]=Files().aFiles()&", mod.id);
+    if (url.size() + part.size() > MAX_URL_LENGTH) {
+      break;
+    }
+    url += part;
     targets.push_back(&mod);
   }
   if (targets.empty()) {
     return;
   }
-  url.pop_back();
+  if (url.back() == '&') {
+    url.pop_back();
+  }
   bool resolved = false;
   bool too_big = false;
   const net::Response response = net::get_with_retry(curl, url, cfg::MAX_FETCH_ATTEMPTS);
@@ -263,7 +271,8 @@ void drain_pages(std::vector<PageResult> &results, std::vector<ModData> &out) {
 
 std::vector<PageJob> plan_remaining_pages(const std::vector<PageResult> &first_pass) {
   std::vector<PageJob> jobs;
-  for (std::size_t i = 0; i < cfg::CATEGORIES.size(); ++i) {
+  const std::size_t count = std::min(first_pass.size(), cfg::CATEGORIES.size());
+  for (std::size_t i = 0; i < count; ++i) {
     const PageResult &result = first_pass[i];
     if (!result.ok ||
         result.mods.size() < static_cast<std::size_t>(cfg::INDEX_PER_PAGE)) {
@@ -319,7 +328,8 @@ void run_pipeline() {
         return !mod.latest_file_url.empty();
       }));
   if (!store::write_mod_list(cfg::MOD_LIST_FILE.data(), all_mods)) {
-    status::print("Error saving mod list!");
+    status::print("Fatal: could not write mod list. Aborting pipeline.");
+    return;
   }
   std::ranges::sort(all_mods, {}, &ModData::name);
   if (!store::write_mod_list(cfg::BY_NAME_FILE.data(), all_mods)) {

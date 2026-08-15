@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -34,6 +35,7 @@ class Registry {
   };
 
   [[nodiscard]] const InstallRecord *find(int id) const noexcept {
+    std::scoped_lock guard{mutex_};
     const auto it = lower_bound(id);
     if (it == entries_.end() || it->id != id) {
       return nullptr;
@@ -46,6 +48,7 @@ class Registry {
   }
 
   void insert_or_assign(int id, InstallRecord record) {
+    std::scoped_lock guard{mutex_};
     const auto it = lower_bound(id);
     if (it != entries_.end() && it->id == id) {
       it->record = std::move(record);
@@ -55,6 +58,7 @@ class Registry {
   }
 
   bool erase(int id) {
+    std::scoped_lock guard{mutex_};
     const auto it = lower_bound(id);
     if (it == entries_.end() || it->id != id) {
       return false;
@@ -64,14 +68,17 @@ class Registry {
   }
 
   void clear() noexcept {
+    std::scoped_lock guard{mutex_};
     entries_.clear();
   }
 
   [[nodiscard]] std::size_t size() const noexcept {
+    std::scoped_lock guard{mutex_};
     return entries_.size();
   }
 
   [[nodiscard]] const std::vector<Entry> &entries() const noexcept {
+    std::scoped_lock guard{mutex_};
     return entries_;
   }
 
@@ -90,6 +97,7 @@ class Registry {
                             });
   }
 
+  mutable std::mutex mutex_;
   std::vector<Entry> entries_;
 };
 

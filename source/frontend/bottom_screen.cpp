@@ -17,7 +17,9 @@ float measure_imgui(const char *content) {
 }
 
 void text_centered(const char *content, const ImVec4 &color, float y) {
-  ImGui::SetCursorPos(ImVec2((cfg::BOT_W - ImGui::CalcTextSize(content).x) * 0.5f, y));
+  const float width = ImGui::CalcTextSize(content).x;
+  ImGui::SetCursorPosX((cfg::BOT_W - width) * 0.5f);
+  ImGui::SetCursorPosY(y);
   ImGui::TextColored(color, "%s", content);
 }
 

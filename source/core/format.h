@@ -11,7 +11,7 @@
 namespace mm {
 namespace fmt {
 
-inline void format_placeholder_count_does_not_match_arguments() {}
+inline void trigger_format_mismatch_error() {}
 
 template <typename... Args>
 class Spec {
@@ -33,7 +33,7 @@ class Spec {
       ++i;
     }
     if (placeholders != sizeof...(Args)) {
-      format_placeholder_count_does_not_match_arguments();
+      trigger_format_mismatch_error();
     }
   }
 

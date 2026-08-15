@@ -1,6 +1,7 @@
 #include "backend/net.h"
 
 #include <3ds.h>
+#include <limits>
 
 namespace mm {
 namespace net {
@@ -30,13 +31,16 @@ void share_cleanup() {
 }
 
 std::size_t write_to_string(void *contents, std::size_t size, std::size_t nmemb, void *userp) {
-  const std::size_t total = size * nmemb;
-  auto *out = static_cast<std::string *>(userp);
-  if (total > 0 && out->size() > cfg::MAX_RESPONSE_SIZE - total) {
+  if (size == 0 || nmemb == 0) {
+    return 0;
+  }
+  if (size > std::numeric_limits<std::size_t>::max() / nmemb) {
     return CURL_WRITEFUNC_ERROR;
   }
-  if (total == 0) {
-    return 0;
+  const std::size_t total = size * nmemb;
+  auto *out = static_cast<std::string *>(userp);
+  if (out->size() + total > cfg::MAX_RESPONSE_SIZE) {
+    return CURL_WRITEFUNC_ERROR;
   }
   out->append(static_cast<const char *>(contents), total);
   return total;
@@ -47,9 +51,13 @@ void configure(CURL *curl) noexcept {
   curl_easy_setopt(curl, CURLOPT_USERAGENT, cfg::USER_AGENT.data());
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-  curl_easy_setopt(curl, CURLOPT_CAINFO, cfg::CA_BUNDLE_PATH.data());
+  CURLcode rc;
+  rc = curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+  assert(rc == CURLE_OK);
+  rc = curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  assert(rc == CURLE_OK);
+  rc = curl_easy_setopt(curl, CURLOPT_CAINFO, cfg::CA_BUNDLE_PATH.data());
+  assert(rc == CURLE_OK);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
   curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
@@ -83,7 +91,15 @@ Response get_with_retry(CURL *curl, const std::string &url, int max_attempts) {
   Response response;
   for (int attempt = 0; attempt < max_attempts; ++attempt) {
     if (attempt > 0) {
-      svcSleepThread(cfg::RETRY_BASE_DELAY_NS << (attempt - 1));
+      u64 delay = cfg::RETRY_BASE_DELAY_NS;
+      for (int i = 1; i < attempt; ++i) {
+        delay *= 2;
+        if (delay > 30'000'000'000ULL) {
+          delay = 30'000'000'000ULL;
+          break;
+        }
+      }
+      svcSleepThread(delay);
     }
     response = get(curl, url);
     if (response.ok) {

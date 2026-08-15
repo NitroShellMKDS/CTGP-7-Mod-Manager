@@ -43,7 +43,7 @@ void jpeg_silence(j_common_ptr);
 
 [[nodiscard]] bool jpeg_decode(const unsigned char *source, std::size_t length, RawImage &out);
 
-[[nodiscard]] bool jpeg_encode(const unsigned char *rgb, unsigned char **out_buffer,
+[[nodiscard]] bool jpeg_encode(unsigned char *rgb, unsigned char **out_buffer,
                                unsigned long *out_length);
 
 void crop_resize(const RawImage &source, unsigned char *destination) noexcept;

@@ -48,6 +48,9 @@ bool remove_tree(std::string_view root) {
         continue;
       }
       const std::string full = join(current, name);
+      if (full.size() < root.size() || full.compare(0, root.size(), root) != 0) {
+        continue;
+      }
       struct stat info{};
       if (::lstat(full.c_str(), &info) != 0) {
         if (errno == ENOENT) {
@@ -70,6 +73,7 @@ bool remove_tree(std::string_view root) {
       }
     }
     if (!descended && ::rmdir(current.c_str()) != 0 && errno != ENOENT) {
+      status::print("rmdir failed for {}: errno={}", current, errno);
       return false;
     }
   }
@@ -105,18 +109,19 @@ void unlink_quietly(const char *path) noexcept {
 
 bool replace_file(const char *source, const char *destination) noexcept {
   const PathGuard guard{path_lock};
-  ::unlink(destination);
   if (::rename(source, destination) == 0) {
     return true;
   }
-  ::unlink(source);
   return false;
 }
 
 std::optional<int64_t> file_size(const char *path) noexcept {
   const PathGuard guard{path_lock};
   struct stat info{};
-  if (::stat(path, &info) != 0 || info.st_size <= 0) {
+  if (::stat(path, &info) != 0) {
+    return std::nullopt;
+  }
+  if (info.st_size < 0) {
     return std::nullopt;
   }
   return static_cast<int64_t>(info.st_size);

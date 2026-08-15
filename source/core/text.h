@@ -27,7 +27,7 @@ inline constexpr std::string_view ELLIPSIS = "\xE2\x80\xA6";
   if ((lead & 0xF8) == 0xF0) {
     return 4;
   }
-  return 1;
+  return 1;  // invalid lead: treat as single byte for resilience
 }
 
 [[nodiscard]] constexpr std::size_t step(std::string_view input, std::size_t index) noexcept {

@@ -42,10 +42,12 @@ std::array<Publication, cfg::THUMB_WORKERS> publications;
 std::array<sys::Thread, cfg::THUMB_WORKERS> workers;
 std::array<WorkerContext, cfg::THUMB_WORKERS> worker_contexts;
 std::array<Request, cfg::THUMB_QUEUE> queue;
+int queue_head = 0;
 int queue_size = 0;
 std::array<int, cfg::THUMB_WORKERS> in_flight{};
 std::array<int, cfg::THUMB_FAIL_RING> failures{};
 int failure_cursor = 0;
+int failure_count = 0;
 std::array<int, cfg::CARDS_PER_PAGE> wanted{};
 int wanted_count = 0;
 u32 frame_counter = 0;
@@ -63,7 +65,11 @@ bool is_resident(int mod_id) noexcept {
 }
 
 bool has_failed(int mod_id) noexcept {
-  return std::ranges::find(failures, mod_id) != failures.end();
+  if (mod_id == 0) return true;
+  for (int i = 0; i < failure_count; ++i) {
+    if (failures[i] == mod_id) return true;
+  }
+  return false;
 }
 
 void mark_failed(int mod_id) noexcept {
@@ -72,6 +78,9 @@ void mark_failed(int mod_id) noexcept {
   }
   failures[static_cast<std::size_t>(failure_cursor)] = mod_id;
   failure_cursor = (failure_cursor + 1) % cfg::THUMB_FAIL_RING;
+  if (failure_count < cfg::THUMB_FAIL_RING) {
+    ++failure_count;
+  }
 }
 
 bool is_in_flight(int mod_id) noexcept {
@@ -109,6 +118,7 @@ void rebuild_wanted() noexcept {
 }
 
 void rebuild_queue() noexcept {
+  queue_head = 0;
   queue_size = 0;
   const int visible = model::visible_count();
   for (int i = 0; i < visible && queue_size < cfg::THUMB_QUEUE; ++i) {
@@ -143,10 +153,8 @@ void worker_main(void *argument) {
     {
       const std::scoped_lock guard{lock};
       if (!quit_requested.load(std::memory_order_relaxed) && queue_size > 0) {
-        request = queue[0];
-        for (int i = 1; i < queue_size; ++i) {
-          queue[static_cast<std::size_t>(i - 1)] = queue[static_cast<std::size_t>(i)];
-        }
+        request = queue[queue_head];
+        queue_head = (queue_head + 1) % cfg::THUMB_QUEUE;
         --queue_size;
         in_flight[static_cast<std::size_t>(index)] = request.mod_id;
       }

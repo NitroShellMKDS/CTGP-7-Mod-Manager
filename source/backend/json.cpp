@@ -10,6 +10,9 @@ bool is(json_object *object, json_type type) noexcept {
 }
 
 json_object *field(json_object *object, const char *key, json_type type) noexcept {
+  if (object == nullptr) {
+    return nullptr;
+  }
   json_object *value = nullptr;
   if (!json_object_object_get_ex(object, key, &value)) {
     return nullptr;

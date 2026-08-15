@@ -5,6 +5,7 @@
 #include "backend/sd_card.h"
 #include "core/config.h"
 #include "core/format.h"
+#include "core/status.h"
 #include "frontend/model.h"
 
 #include <algorithm>
@@ -31,7 +32,7 @@ std::size_t download_write(void *contents, std::size_t size, std::size_t nmemb, 
   if (total == 0) {
     return 0;
   }
-  if (sink->written > cfg::DOWNLOAD_MAX_BYTES - static_cast<curl_off_t>(total)) {
+  if (sink->written + static_cast<curl_off_t>(total) > cfg::DOWNLOAD_MAX_BYTES) {
     return CURL_WRITEFUNC_ERROR;
   }
   if (std::fwrite(contents, 1, total, sink->file) != total) {
@@ -260,7 +261,9 @@ void apply(const Result &result) {
   record.files = result.files;
   record.source_file_name = result.source_name;
   store::installed.insert_or_assign(result.mod_id, std::move(record));
-  (void)store::save_installed();
+  if (!store::save_installed()) {
+    status::print("Warning: could not save installed mods list.");
+  }
   model::resort_after_change();
 }
 
@@ -354,7 +357,9 @@ void uninstall() {
   const std::vector<std::string> files = record->files;
   const int mod_id = mod->id;
   store::installed.erase(mod_id);
-  (void)store::save_installed();
+  if (!store::save_installed()) {
+    status::print("Warning: could not save installed mods list.");
+  }
   for (const std::string &file : files) {
     const std::string path = fmt::format("{}{}", cfg::CTGP7_DIR, file);
     sd::unlink_quietly(path.c_str());

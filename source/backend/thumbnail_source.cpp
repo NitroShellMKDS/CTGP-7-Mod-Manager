@@ -103,7 +103,7 @@ bool jpeg_decode(const unsigned char *source, std::size_t length, RawImage &out)
   return true;
 }
 
-bool jpeg_encode(const unsigned char *rgb, unsigned char **out_buffer,
+bool jpeg_encode(unsigned char *rgb, unsigned char **out_buffer,
                  unsigned long *out_length) {
   jpeg_compress_struct cinfo;
   JpegError jerr;
@@ -124,9 +124,8 @@ bool jpeg_encode(const unsigned char *rgb, unsigned char **out_buffer,
     jpeg_set_quality(&cinfo, cfg::THUMB_JPEG_QUALITY, TRUE);
     jpeg_start_compress(&cinfo, TRUE);
     while (cinfo.next_scanline < cinfo.image_height) {
-      JSAMPROW row = const_cast<JSAMPROW>(
-          rgb + static_cast<std::size_t>(cinfo.next_scanline) *
-                    static_cast<std::size_t>(cfg::THUMB_IMG_W) * 3u);
+      JSAMPROW row = rgb + static_cast<std::size_t>(cinfo.next_scanline) *
+                               static_cast<std::size_t>(cfg::THUMB_IMG_W) * 3u;
       if (jpeg_write_scanlines(&cinfo, &row, 1) != 1) {
         break;
       }
@@ -285,7 +284,7 @@ std::size_t download_write(void *contents, std::size_t size, std::size_t nmemb, 
     return 0;
   }
   if (sink->length + total > cfg::THUMB_MAX_BYTES) {
-    return 0;
+    return CURL_WRITEFUNC_ERROR;
   }
   if (sink->length + total > sink->capacity) {
     std::size_t capacity = sink->capacity != 0 ? sink->capacity : 32768;
@@ -294,7 +293,7 @@ std::size_t download_write(void *contents, std::size_t size, std::size_t nmemb, 
     }
     auto *grown = static_cast<unsigned char *>(std::realloc(sink->data, capacity));
     if (grown == nullptr) {
-      return 0;
+      return CURL_WRITEFUNC_ERROR;
     }
     sink->data = grown;
     sink->capacity = capacity;

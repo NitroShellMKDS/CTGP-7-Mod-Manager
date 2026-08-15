@@ -376,5 +376,10 @@ class ScopeGuard {
 template <std::invocable Fn>
 ScopeGuard(Fn) -> ScopeGuard<Fn>;
 
+template <typename Fn>
+auto make_scope_guard(Fn &&fn) {
+  return ScopeGuard<std::decay_t<Fn>>{std::forward<Fn>(fn)};
+}
+
 }  // namespace sys
 }  // namespace mm

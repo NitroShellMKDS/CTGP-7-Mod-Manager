@@ -135,14 +135,12 @@ std::size_t extract(const char *archive_path, ExtractResult &out) {
   archive_read_support_format_7zip(reader.get());
   archive_read_support_format_rar(reader.get());
   archive_read_support_format_rar5(reader.get());
+  const sd::PathGuard path_guard{sd::path_lock};
   const int64_t archive_bytes = sd::file_size(archive_path).value_or(0);
-  {
-    const sd::PathGuard guard{sd::path_lock};
-    if (archive_read_open_filename(reader.get(), archive_path,
-                                   cfg::ARCHIVE_BLOCK_SIZE) != ARCHIVE_OK) {
-      out.message = archive_message(reader.get(), "Cannot open archive");
-      return 0;
-    }
+  if (archive_read_open_filename(reader.get(), archive_path,
+                                 cfg::ARCHIVE_BLOCK_SIZE) != ARCHIVE_OK) {
+    out.message = archive_message(reader.get(), "Cannot open archive");
+    return 0;
   }
   sys::ScopeGuard discard{[&out] {
     out.files.clear();

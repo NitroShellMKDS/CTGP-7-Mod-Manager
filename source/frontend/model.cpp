@@ -51,7 +51,8 @@ void sort() {
     const ModData &right = mods[b.index];
     return by_name ? left.name < right.name : left.latest_file_date > right.latest_file_date;
   });
-  std::vector<ModData> ordered;
+  static std::vector<ModData> ordered;
+  ordered.clear();
   ordered.reserve(count);
   for (const SortKey &key : keys) {
     ordered.push_back(std::move(mods[key.index]));
