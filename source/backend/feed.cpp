@@ -25,6 +25,8 @@ void parse_index_records(json_object *records, std::vector<ModData> &out) {
     if (!js::is(record, json_type_object)) {
       continue;
     }
+    const char *nsfw = js::string_field(record, "_sInitialVisibility");
+    if (!nsfw || std::string_view{nsfw} != "show") continue;
     const int id = js::integer_field<int>(record, "_idRow");
     if (id == 0) {
       continue;
