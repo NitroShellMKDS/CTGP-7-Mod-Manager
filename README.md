@@ -27,9 +27,10 @@ make
 
 ## Credits:
 
-* NitroShell – Original Idea and Project Lead, Music Assistance
-* bonkmaykr – CTGP-7 Mod Manager Logo, Music, Helper
-* Straky - Home Menu Icon
+* NitroShell – Original Idea, Project Lead, Programming Music Assistance
+* bonkmaykr – CTGP-7 Mod Manager Logo, Music, Programming
+* MisakiP_ - Programming. Playtesting
+* Straky - Home Menu Icon, Playtesting
 * gameonion – CTGP-7 Logo
 
 ## Libraries & Tools
