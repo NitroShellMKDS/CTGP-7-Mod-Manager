@@ -21,6 +21,22 @@
 namespace mm {
 namespace app {
 
+void run_search_dialog() {
+  SwkbdState swkbd;
+  swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, cfg::SEARCH_MAX_LEN);
+  swkbdSetValidation(&swkbd, SWKBD_ANYTHING, 0, 0);
+  swkbdSetHintText(&swkbd, "Type to filter mods");
+  if (!model::search_query.empty()) {
+    swkbdSetInitialText(&swkbd, model::search_query.c_str());
+  }
+  swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, "Cancel", false);
+  swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, "Search", true);
+  char output[cfg::SEARCH_MAX_LEN * 4 + 1];
+  if (swkbdInputText(&swkbd, output, sizeof(output)) == SWKBD_BUTTON_CONFIRM) {
+    model::apply_search(output);
+  }
+}
+
 bool enter_browse_state() {
   (void)store::load_installed();
   const char *preferred =
@@ -34,6 +50,8 @@ bool enter_browse_state() {
   model::window_start = 0;
   model::selected = 0;
   model::sort();
+  model::all_mods = model::mods;
+  model::search_query.clear();
   (void)thumbs::init();
   (void)install::init();
   return true;
@@ -78,6 +96,9 @@ void handle_browse_input(u32 nav_keys, u32 pressed) {
   }
   if (pressed & KEY_X) {
     model::set_sort_mode(!model::sort_by_name);
+  }
+  if (pressed & KEY_Y) {
+    run_search_dialog();
   }
 }
 

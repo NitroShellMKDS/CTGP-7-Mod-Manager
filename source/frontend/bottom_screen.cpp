@@ -5,6 +5,7 @@
 #include "core/format.h"
 #include "core/text.h"
 #include "core/log.h"
+#include "frontend/app.h"
 
 #include <algorithm>
 #include <atomic>
@@ -124,6 +125,50 @@ bool wrapped_button(const char *id, const std::string &label, float y,
   return pressed;
 }
 
+enum class CornerIcon { NONE, MAGNIFIER, X };
+
+bool corner_button(const char *id, float x, float y, CornerIcon icon,
+                   const ImVec4 &background, const ImVec4 &background_hot,
+                   const ImVec4 &foreground) {
+  const float w = cfg::CORNER_BTN_W;
+  const float h = cfg::CORNER_BTN_H;
+  ImGui::SetCursorPos(ImVec2(x, y));
+  const bool pressed = ImGui::InvisibleButton(id, ImVec2(w, h));
+  const ImVec2 top_left = ImGui::GetItemRectMin();
+  const ImVec2 bottom_right = ImGui::GetItemRectMax();
+  const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+  ImDrawList *list = ImGui::GetWindowDrawList();
+  const ImU32 background_color = ImGui::GetColorU32(hot ? background_hot : background);
+  const ImU32 foreground_color = ImGui::GetColorU32(foreground);
+  list->AddRectFilled(top_left, bottom_right, background_color, cfg::BTN_ROUNDING);
+  list->AddRect(top_left, bottom_right, foreground_color, cfg::BTN_ROUNDING, 0, 1.0f);
+  switch (icon) {
+    case CornerIcon::MAGNIFIER: {
+      const ImVec2 center(top_left.x + w * 0.42f, top_left.y + h * 0.46f);
+      const float radius = w * 0.20f;
+      list->AddCircle(center, radius, foreground_color, 16, 2.0f);
+      const float inset = radius * 0.7071f * 0.85f;
+      const float handle = w * 0.26f;
+      const ImVec2 handle_start(center.x + inset, center.y + inset);
+      list->AddLine(handle_start,
+                    ImVec2(handle_start.x + handle, handle_start.y + handle),
+                    foreground_color, 2.0f);
+      break;
+    }
+    case CornerIcon::X: {
+      const ImVec2 inner(top_left.x + w * 0.30f, top_left.y + h * 0.30f);
+      const ImVec2 outer(top_left.x + w * 0.70f, top_left.y + h * 0.70f);
+      list->AddLine(inner, outer, foreground_color, 2.5f);
+      list->AddLine(ImVec2(outer.x, inner.y), ImVec2(inner.x, outer.y),
+                    foreground_color, 2.5f);
+      break;
+    }
+    case CornerIcon::NONE:
+      break;
+  }
+  return pressed;
+}
+
 void draw_sort_options() {
   text_centered("Sort Options", cfg::IM_GOLD, cfg::SORT_LABEL_Y);
   const ImGuiStyle &style = ImGui::GetStyle();
@@ -216,8 +261,30 @@ void bottom_browse() {
     }
   } else {
     text_centered("[A] Install  [B] Uninstall  [X] Sort", cfg::IM_AUTHOR, cfg::HINT1_Y);
-    text_centered(busy ? "[B] Cancel  [START] Exit" : "[START] Exit",
-                  cfg::IM_AUTHOR, cfg::HINT2_Y);
+    text_centered(busy ? "[B] Cancel  [START] Exit" : "[START] Exit", cfg::IM_AUTHOR,
+                  cfg::HINT2_Y);
+  }
+  if (model::searching()) {
+    text_centered(fmt::format("Filter: \"{}\"", model::search_query).c_str(),
+                  cfg::IM_AMBER, cfg::SEARCH_Y);
+  }
+  {
+    const bool search_pressed =
+        corner_button("##search", cfg::CORNER_BTN_X, cfg::CORNER_BTN_Y,
+                      CornerIcon::MAGNIFIER, cfg::IM_BTN_BG, cfg::IM_BTN_HOT,
+                      cfg::IM_GOLD);
+    if (search_pressed) {
+      app::run_search_dialog();
+    }
+    if (model::searching()) {
+      const bool clear_pressed =
+          corner_button("##clear", cfg::CLEAR_BTN_X, cfg::CLEAR_BTN_Y,
+                        CornerIcon::X, cfg::IM_UNINST_BG, cfg::IM_UNINST_HOT,
+                        cfg::IM_UNINST_FG);
+      if (clear_pressed) {
+        model::clear_search();
+      }
+    }
   }
   ImGui::End();
 }

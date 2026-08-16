@@ -11,6 +11,8 @@ namespace model {
 
 AppState state = AppState::FETCHING;
 std::vector<ModData> mods;
+std::vector<ModData> all_mods;
+std::string search_query;
 int window_start = 0;
 int selected = 0;
 bool sort_by_name = false;
@@ -18,6 +20,46 @@ std::string error_text;
 bool cards_dirty = true;
 u32 nav_held_key = 0;
 float nav_timer = 0.0f;
+
+namespace {
+
+char lower_ascii(char c) noexcept {
+  if (c >= 'A' && c <= 'Z') {
+    return static_cast<char>(c + ('a' - 'A'));
+  }
+  return c;
+}
+
+bool contains_query(const std::string &text, const std::string &query) noexcept {
+  if (query.empty()) {
+    return true;
+  }
+  const std::size_t qlen = query.size();
+  if (qlen > text.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i + qlen <= text.size(); ++i) {
+    std::size_t j = 0;
+    while (j < qlen && lower_ascii(text[i + j]) == query[j]) {
+      ++j;
+    }
+    if (j == qlen) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string lowercase(std::string_view source) {
+  std::string result;
+  result.reserve(source.size());
+  for (const char c : source) {
+    result.push_back(lower_ascii(c));
+  }
+  return result;
+}
+
+}  // namespace
 
 Priority priority_of(const ModData &mod) noexcept {
   const store::InstallRecord *record = store::installed.find(mod.id);
@@ -102,6 +144,33 @@ ModAction current_action() noexcept {
   return mod->latest_file_date > record->date ? ModAction::UPDATE : ModAction::INSTALLED;
 }
 
+bool searching() noexcept {
+  return !search_query.empty();
+}
+
+void apply_search(const std::string &query) {
+  search_query = query;
+  const std::string lowered = query.empty() ? std::string{} : lowercase(query);
+  mods.clear();
+  if (lowered.empty()) {
+    mods = all_mods;
+  } else {
+    for (const ModData &mod : all_mods) {
+      if (contains_query(mod.name, lowered) || contains_query(mod.author, lowered)) {
+        mods.push_back(mod);
+      }
+    }
+  }
+  sort();
+  window_start = 0;
+  selected = 0;
+  cards_dirty = true;
+}
+
+void clear_search() {
+  apply_search("");
+}
+
 void clamp_view() noexcept {
   window_start = std::clamp(window_start, 0, max_window_start());
   const int visible = visible_count();
@@ -109,6 +178,10 @@ void clamp_view() noexcept {
 }
 
 void resort_after_change() {
+  if (searching()) {
+    apply_search(search_query);
+    return;
+  }
   sort();
   clamp_view();
   cards_dirty = true;

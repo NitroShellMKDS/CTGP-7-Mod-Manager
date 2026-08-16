@@ -15,6 +15,8 @@ namespace app {
 
 [[nodiscard]] bool enter_browse_state();
 
+void run_search_dialog();
+
 void advance_state(bool feed_done);
 
 void handle_browse_input(u32 nav_keys, u32 pressed);
