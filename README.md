@@ -31,6 +31,7 @@ make
 * bonkmaykr – CTGP-7 Mod Manager Logo, Music, Programming
 * MisakiP_ - Programming. Playtesting
 * Straky - Home Menu Icon, Playtesting
+* Orj_Osc - Playtesting
 * gameonion – CTGP-7 Logo
 
 ## Libraries & Tools
