@@ -1,6 +1,6 @@
 ![CTGP-7 Mod Manager Logo](assets/logo.png)
 
-**CTGP-7 Mod Manager** is a Nintendo 3DS homebrew application that allows users to easily download, update, and uninstall mods on [GameBanana](https://gamebanana.com/games/5955) for CTGP-7.
+**CTGP-7 Mod Manager** is a Nintendo 3DS homebrew application that allows users to easily install, update, and uninstall mods from [GameBanana](https://gamebanana.com/games/5955) for CTGP-7.
 
 
 ## Building from Source
