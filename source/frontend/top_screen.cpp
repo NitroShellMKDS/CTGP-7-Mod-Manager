@@ -1,6 +1,7 @@
 #include "frontend/top_screen.h"
 
 #include "core/text.h"
+#include "core/time.h"
 #include "frontend/thumbnail_cache.h"
 
 #include <citro3d.h>
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <ctime>
 
 namespace mm {
 namespace draw {
@@ -19,6 +21,7 @@ int card_text_count = 0;
 float font_line_height = 30.0f;
 float name_scale = 1.0f;
 float author_scale = 1.0f;
+float updated_scale = 1.0f;
 float status_scale = 1.0f;
 float message_scale = 1.0f;
 
@@ -44,6 +47,7 @@ bool init() {
   }
   name_scale = cfg::NAME_PX / font_line_height;
   author_scale = cfg::AUTHOR_PX / font_line_height;
+  updated_scale = cfg::UPDATED_PX / font_line_height;
   status_scale = cfg::STATUS_PX / font_line_height;
   message_scale = cfg::MSG_PX / font_line_height;
   card_buffer = C2D_TextBufNew(cfg::CARD_TEXT_GLYPHS);
@@ -92,13 +96,34 @@ void rebuild_card_text() {
         model::mods[static_cast<std::size_t>(model::window_start + i)];
     CardText &entry = card_text[static_cast<std::size_t>(i)];
     entry.has_name = parse(mod.name, name_scale, entry.name, entry.name_width);
-    entry.has_author = parse(mod.author, author_scale, entry.author, entry.author_width);
+    const std::string author_text = std::string("By: ") + mod.author;
+    entry.has_author = parse(author_text, author_scale, entry.author, entry.author_width);
+
+    // Build and parse the "Updated: ..." line using the timeutil helper.
+    // Prefer showing "Updated: unknown" when timestamp is missing.
+    entry.has_updated = false;
+    entry.updated_width = 0.0f;
+    if (mod.latest_file_date > 0) {
+      const std::string updated_text = mm::timeutil::format_update_label(mod.latest_file_date);
+      entry.has_updated = parse(updated_text, updated_scale, entry.updated, entry.updated_width);
+    }
+
     const model::Priority priority = model::priority_of(mod);
     entry.has_status =
         priority > model::Priority::NOT_INSTALLED &&
         parse(priority == model::Priority::UPDATE_AVAILABLE ? "Update Available"
                                                             : "Installed",
               status_scale, entry.status, entry.status_width);
+
+    // If the configured vertical layout would overflow the card content area,
+    // hide the 'Updated' line to avoid visual overlap. This ensures tight cards
+    // display name and status cleanly.
+    const float max_content_h = cfg::CONTENT_H;
+    const float status_bottom = cfg::STATUS_Y + font_line_height * status_scale;
+    if (entry.has_updated && status_bottom > max_content_h) {
+      entry.has_updated = false;
+      entry.updated_width = 0.0f;
+    }
   }
   card_text_count = visible;
 }
@@ -134,6 +159,12 @@ void draw_card(int slot, const store::ModData &mod, bool selected) {
     C2D_DrawText(&entry.author, C2D_WithColor,
                  content_x + (cfg::CONTENT_W - entry.author_width) * 0.5f,
                  content_y + cfg::AUTHOR_Y, 0.0f, author_scale, author_scale,
+                 cfg::CLR_AUTHOR);
+  }
+  if (entry.has_updated) {
+    C2D_DrawText(&entry.updated, C2D_WithColor,
+                 content_x + (cfg::CONTENT_W - entry.updated_width) * 0.5f,
+                 content_y + cfg::UPDATED_Y, 0.0f, updated_scale, updated_scale,
                  cfg::CLR_AUTHOR);
   }
   if (entry.has_status) {

@@ -75,6 +75,12 @@ void advance_state(bool feed_done) {
 }
 
 void handle_browse_input(u32 nav_keys, u32 pressed) {
+  // If a bottom overlay is active (e.g., About), ignore all physical button input
+  // as requested — only the on-screen Close button should dismiss the overlay.
+  if (model::bottom_overlay == model::BottomOverlay::ABOUT) {
+    return;
+  }
+
   model::handle_nav(nav_keys);
   if (nav_keys != 0) {
     install::user_message.clear();

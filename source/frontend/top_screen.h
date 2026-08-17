@@ -15,12 +15,15 @@ namespace draw {
 struct CardText {
   C2D_Text name{};
   C2D_Text author{};
+  C2D_Text updated{};
   C2D_Text status{};
   bool has_name = false;
   bool has_author = false;
+  bool has_updated = false;
   bool has_status = false;
   float name_width = 0.0f;
   float author_width = 0.0f;
+  float updated_width = 0.0f;
   float status_width = 0.0f;
 };
 
@@ -31,6 +34,7 @@ extern int card_text_count;
 extern float font_line_height;
 extern float name_scale;
 extern float author_scale;
+extern float updated_scale;
 extern float status_scale;
 extern float message_scale;
 

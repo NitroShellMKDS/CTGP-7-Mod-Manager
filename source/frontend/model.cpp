@@ -20,6 +20,7 @@ std::string error_text;
 bool cards_dirty = true;
 u32 nav_held_key = 0;
 float nav_timer = 0.0f;
+BottomOverlay bottom_overlay = BottomOverlay::NONE;
 
 namespace {
 

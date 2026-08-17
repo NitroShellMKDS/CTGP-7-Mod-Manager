@@ -125,7 +125,7 @@ bool wrapped_button(const char *id, const std::string &label, float y,
   return pressed;
 }
 
-enum class CornerIcon { NONE, MAGNIFIER, X };
+enum class CornerIcon { NONE, MAGNIFIER, X, QUESTION_MARK };
 
 bool corner_button(const char *id, float x, float y, CornerIcon icon,
                    const ImVec4 &background, const ImVec4 &background_hot,
@@ -165,6 +165,15 @@ bool corner_button(const char *id, float x, float y, CornerIcon icon,
     }
     case CornerIcon::NONE:
       break;
+    case CornerIcon::QUESTION_MARK: {
+      const float font_size = ImGui::GetFontSize();
+      const ImVec2 text_size = ImGui::CalcTextSize("?");
+      const ImVec2 text_pos(
+          top_left.x + (w - text_size.x * 2.0f) * 0.5f,
+          top_left.y + (h - text_size.y * 2.0f) * 0.5f);
+      list->AddText(ImGui::GetFont(), font_size * 2.0f, text_pos, foreground_color, "?");
+      break;
+    }
   }
   return pressed;
 }
@@ -207,6 +216,29 @@ void bottom_browse() {
   ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
   ImGui::SetNextWindowSize(ImVec2(cfg::BOT_W, cfg::BOT_H));
   ImGui::Begin("##browse", nullptr, cfg::SCREEN_WINDOW_FLAGS);
+  // If an overlay is active, draw it full-screen and ignore other controls.
+  if (model::bottom_overlay == model::BottomOverlay::ABOUT) {
+    ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
+    // Full replacement content for About/Credits
+    static const char *about_content = "CTGP-7 Mod Manager: A 3DS homebrew app to manage CTGP-7 mods.\n\nCredits: NitroShell (Lead/Code), bonkmaykr (Code/Audio/Logo), MisakiP_ (Code/QA), Straky (Icon/QA), Orj_Osc (QA), gameonion (CTGP-7 Logo).\n\nProvided as-is. Use at your own risk.";
+    // Title
+    text_centered("About / Credits", cfg::IM_GOLD, 16.0f);
+    ImGui::SetCursorPos(ImVec2(12.0f, 36.0f));
+    ImGui::PushTextWrapPos(12.0f + (cfg::BOT_W - 24.0f));
+    ImGui::TextWrapped(about_content);
+    ImGui::PopTextWrapPos();
+    // Large Close button centered at bottom
+    const float close_y = cfg::BOT_H - (cfg::ACTION_BTN_H + 12.0f);
+    ImGui::BeginDisabled(false);
+    if (wrapped_button("##about_close", "Close", close_y, cfg::ACTION_BTN_H,
+                       cfg::IM_BTN_BG, cfg::IM_BTN_HOT, cfg::IM_GOLD, 2.0f)) {
+      model::bottom_overlay = model::BottomOverlay::NONE;
+    }
+    ImGui::EndDisabled();
+    ImGui::End();
+    return;
+  }
+
   draw_sort_options();
   ImGui::GetWindowDrawList()->AddRectFilled(
       ImVec2(cfg::BTN_X, cfg::SEP_Y),
@@ -268,22 +300,30 @@ void bottom_browse() {
     text_centered(fmt::format("Filter: \"{}\"", model::search_query).c_str(),
                   cfg::IM_AMBER, cfg::SEARCH_Y);
   }
-  {
-    const bool search_pressed =
-        corner_button("##search", cfg::CORNER_BTN_X, cfg::CORNER_BTN_Y,
-                      CornerIcon::MAGNIFIER, cfg::IM_BTN_BG, cfg::IM_BTN_HOT,
-                      cfg::IM_GOLD);
-    if (search_pressed) {
-      app::run_search_dialog();
-    }
-    if (model::searching()) {
-      const bool clear_pressed =
-          corner_button("##clear", cfg::CLEAR_BTN_X, cfg::CLEAR_BTN_Y,
-                        CornerIcon::X, cfg::IM_UNINST_BG, cfg::IM_UNINST_HOT,
-                        cfg::IM_UNINST_FG);
-      if (clear_pressed) {
-        model::clear_search();
-      }
+
+  const bool search_pressed =
+      corner_button("##search", cfg::CORNER_BTN_X, cfg::CORNER_BTN_Y,
+                    CornerIcon::MAGNIFIER, cfg::IM_BTN_BG, cfg::IM_BTN_HOT,
+                    cfg::IM_GOLD);
+  if (search_pressed) {
+    app::run_search_dialog();
+  }
+  // About / Credits button in top-right corner of the bottom screen.
+  const float about_x = cfg::BOT_W - cfg::CORNER_BTN_W - cfg::CORNER_BTN_X;
+  const bool about_pressed = corner_button("##about", about_x, cfg::CORNER_BTN_Y,
+                                          CornerIcon::QUESTION_MARK, cfg::IM_BTN_BG,
+                                          cfg::IM_BTN_HOT, cfg::IM_GOLD);
+  if (about_pressed) {
+    model::bottom_overlay = model::BottomOverlay::ABOUT;
+  }
+
+  if (model::searching()) {
+    const bool clear_pressed =
+        corner_button("##clear", cfg::CLEAR_BTN_X, cfg::CLEAR_BTN_Y,
+                      CornerIcon::X, cfg::IM_UNINST_BG, cfg::IM_UNINST_HOT,
+                      cfg::IM_UNINST_FG);
+    if (clear_pressed) {
+      model::clear_search();
     }
   }
   ImGui::End();

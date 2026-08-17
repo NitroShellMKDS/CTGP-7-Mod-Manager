@@ -44,6 +44,10 @@ extern bool cards_dirty;
 extern u32 nav_held_key;
 extern float nav_timer;
 
+enum class BottomOverlay { NONE = 0, ABOUT = 1 };
+
+extern BottomOverlay bottom_overlay;
+
 [[nodiscard]] Priority priority_of(const ModData &mod) noexcept;
 
 void sort();
