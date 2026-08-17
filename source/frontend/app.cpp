@@ -86,11 +86,17 @@ void handle_browse_input(u32 nav_keys, u32 pressed) {
     install::user_message.clear();
   }
   if (install::busy()) {
+    if (pressed & KEY_A) {
+      (void)install::queue_selected_mod();
+    }
     if (pressed & KEY_B) {
       install::cancel();
     }
     if (pressed & KEY_X) {
       model::set_sort_mode(!model::sort_by_name);
+    }
+    if (pressed & KEY_Y) {
+      model::toggle_selected_queue();
     }
     return;
   }
@@ -104,7 +110,7 @@ void handle_browse_input(u32 nav_keys, u32 pressed) {
     model::set_sort_mode(!model::sort_by_name);
   }
   if (pressed & KEY_Y) {
-    run_search_dialog();
+    model::toggle_selected_queue();
   }
 }
 

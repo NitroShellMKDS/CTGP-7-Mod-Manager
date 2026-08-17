@@ -172,6 +172,8 @@ inline constexpr s64 THUMB_IDLE_WAIT_NS = 50'000'000LL;
 
 inline constexpr u32 CLR_BG = C2D_Color32(0x15, 0x1D, 0x23, 0xFF);
 inline constexpr u32 CLR_SEL_BG = C2D_Color32(0x2A, 0x3B, 0x47, 0xFF);
+inline constexpr u32 CLR_QUEUE = C2D_Color32(0x3B, 0x7A, 0xE0, 0xFF);
+inline constexpr u32 CLR_QUEUE_SEL_BG = C2D_Color32(0x2D, 0x4E, 0x80, 0xFF);
 inline constexpr u32 CLR_GOLD = C2D_Color32(0xAB, 0xA0, 0x22, 0xFF);
 inline constexpr u32 CLR_GREEN = C2D_Color32(0x4C, 0xAF, 0x50, 0xFF);
 inline constexpr u32 CLR_AMBER = C2D_Color32(0xFF, 0xC1, 0x07, 0xFF);

@@ -12,6 +12,7 @@ namespace model {
 AppState state = AppState::FETCHING;
 std::vector<ModData> mods;
 std::vector<ModData> all_mods;
+std::vector<int> queued_mod_ids;
 std::string search_query;
 int window_start = 0;
 int selected = 0;
@@ -131,6 +132,53 @@ const ModData *selected_mod() noexcept {
     return nullptr;
   }
   return &mods[static_cast<std::size_t>(window_start + selected)];
+}
+
+bool queued(int mod_id) noexcept {
+  return std::ranges::any_of(queued_mod_ids,
+                             [mod_id](int queued_id) { return queued_id == mod_id; });
+}
+
+void queue_selected() noexcept {
+  const ModData *mod = selected_mod();
+  if (mod == nullptr) {
+    return;
+  }
+  const auto it = std::ranges::find(queued_mod_ids, mod->id);
+  if (it == queued_mod_ids.end()) {
+    queued_mod_ids.push_back(mod->id);
+  }
+  cards_dirty = true;
+}
+
+void toggle_selected_queue() noexcept {
+  const ModData *mod = selected_mod();
+  if (mod == nullptr) {
+    return;
+  }
+  const auto it = std::ranges::find(queued_mod_ids, mod->id);
+  if (it != queued_mod_ids.end()) {
+    queued_mod_ids.erase(it);
+  } else {
+    queued_mod_ids.push_back(mod->id);
+  }
+  cards_dirty = true;
+}
+
+void remove_queued_mod(int mod_id) noexcept {
+  const auto it = std::ranges::find(queued_mod_ids, mod_id);
+  if (it != queued_mod_ids.end()) {
+    queued_mod_ids.erase(it);
+    cards_dirty = true;
+  }
+}
+
+void clear_queued_mods() noexcept {
+  if (queued_mod_ids.empty()) {
+    return;
+  }
+  queued_mod_ids.clear();
+  cards_dirty = true;
 }
 
 ModAction current_action() noexcept {

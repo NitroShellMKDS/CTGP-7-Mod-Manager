@@ -52,6 +52,13 @@ extern float message_scale;
   return cfg::CLR_GOLD;
 }
 
+[[nodiscard]] constexpr u32 card_accent(const store::ModData &mod, bool queued) noexcept {
+  if (queued) {
+    return cfg::CLR_QUEUE;
+  }
+  return status_color(model::priority_of(mod));
+}
+
 [[nodiscard]] bool init();
 
 void shutdown() noexcept;

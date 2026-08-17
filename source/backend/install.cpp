@@ -20,6 +20,7 @@ std::atomic<bool> cancel_requested{false};
 std::atomic<int> percent{-1};
 std::atomic<int64_t> bytes_done{0};
 std::atomic<int> files_written{0};
+std::vector<Request> queued_requests;
 
 bool aborting() noexcept {
   return quit_requested.load(std::memory_order_relaxed) ||
@@ -140,6 +141,15 @@ bool busy() {
   return slot == Slot::REQUESTED || slot == Slot::RUNNING;
 }
 
+bool installing(int mod_id) noexcept {
+  if (!ready) {
+    return false;
+  }
+  const std::scoped_lock guard{mailbox_lock};
+  return (slot == Slot::REQUESTED || slot == Slot::RUNNING) &&
+         pending.mod_id == mod_id;
+}
+
 void cancel() {
   if (busy()) {
     cancel_requested.store(true, std::memory_order_relaxed);
@@ -160,6 +170,13 @@ void worker_main(void *) {
       if (!quit_requested.load(std::memory_order_relaxed) && slot == Slot::REQUESTED) {
         request = pending;
         slot = Slot::RUNNING;
+        have = true;
+      } else if (!quit_requested.load(std::memory_order_relaxed) && slot == Slot::EMPTY &&
+                 !queued_requests.empty()) {
+        request = queued_requests.front();
+        queued_requests.erase(queued_requests.begin());
+        pending = request;
+        slot = Slot::REQUESTED;
         have = true;
       }
     }
@@ -242,6 +259,56 @@ bool begin(const store::ModData &mod) {
   return accepted;
 }
 
+bool queue_mod(const store::ModData &mod) {
+  if (!ready) {
+    return false;
+  }
+  if (mod.latest_file_url.empty()) {
+    user_message = "This mod has no download link.";
+    return false;
+  }
+  if (!extension_supported(mod.latest_file_name)) {
+    user_message = "Unsupported archive type (only .zip, .7z and .rar).";
+    return false;
+  }
+  Request request;
+  request.mod_id = mod.id;
+  request.file_date = mod.latest_file_date;
+  request.url = mod.latest_file_url;
+  request.source_name = mod.latest_file_name;
+  bool accepted = false;
+  {
+    const std::scoped_lock guard{mailbox_lock};
+    if (slot == Slot::EMPTY) {
+      pending = std::move(request);
+      slot = Slot::REQUESTED;
+      accepted = true;
+    } else {
+      const bool duplicate = std::ranges::any_of(
+          queued_requests, [&request](const Request &current) {
+            return current.mod_id == request.mod_id;
+          });
+      if (!duplicate && pending.mod_id != request.mod_id) {
+        queued_requests.push_back(std::move(request));
+        accepted = true;
+      }
+    }
+  }
+  if (accepted) {
+    wake.signal();
+  }
+  return accepted;
+}
+
+bool queue_selected_mod() {
+  const store::ModData *mod = model::selected_mod();
+  if (mod == nullptr || model::queued(mod->id)) {
+    return false;
+  }
+  model::queue_selected();
+  return queue_mod(*mod);
+}
+
 void apply(const Result &result) {
   if (const store::InstallRecord *previous = store::installed.find(result.mod_id)) {
     for (const std::string &old_file : previous->files) {
@@ -287,6 +354,7 @@ void tick() {
   }
   phase.store(Phase::IDLE, std::memory_order_relaxed);
   cancel_requested.store(false, std::memory_order_relaxed);
+  model::remove_queued_mod(result.mod_id);
   if (result.ok) {
     apply(result);
     user_message.clear();
@@ -330,6 +398,19 @@ std::string progress_label() {
 
 void do_action() {
   if (busy()) {
+    return;
+  }
+  if (!model::queued_mod_ids.empty()) {
+    std::vector<int> queued = model::queued_mod_ids;
+    for (const int mod_id : queued) {
+      const auto it = std::ranges::find_if(model::mods, [mod_id](const store::ModData &mod) {
+        return mod.id == mod_id;
+      });
+      if (it == model::mods.end()) {
+        continue;
+      }
+      (void)queue_mod(*it);
+    }
     return;
   }
   const store::ModData *mod = model::selected_mod();

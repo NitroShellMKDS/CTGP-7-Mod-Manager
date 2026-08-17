@@ -1,5 +1,6 @@
 #include "frontend/top_screen.h"
 
+#include "backend/install.h"
 #include "core/text.h"
 #include "core/time.h"
 #include "frontend/thumbnail_cache.h"
@@ -132,13 +133,19 @@ void draw_card(int slot, const store::ModData &mod, bool selected) {
   const float x = static_cast<float>(slot % cfg::GRID_COLS) * cfg::CELL_W + cfg::CARD_MARGIN;
   const float y = static_cast<float>(slot / cfg::GRID_COLS) * cfg::CELL_H + cfg::CARD_MARGIN;
   const model::Priority priority = model::priority_of(mod);
-  const u32 accent = status_color(priority);
+  const bool queued = model::queued(mod.id) || install::installing(mod.id);
+  const u32 accent = queued ? cfg::CLR_QUEUE : status_color(priority);
   C2D_DrawRectSolid(x, y, 0.0f, cfg::CARD_W, cfg::CARD_H,
-                    selected ? accent : cfg::CLR_BG);
+                    queued ? cfg::CLR_QUEUE : (selected ? accent : cfg::CLR_BG));
   const float content_x = x + cfg::CARD_BORDER;
   const float content_y = y + cfg::CARD_BORDER;
   C2D_DrawRectSolid(content_x, content_y, 0.0f, cfg::CONTENT_W, cfg::CONTENT_H,
                     selected ? cfg::CLR_SEL_BG : cfg::CLR_BG);
+  if (queued) {
+    const float indicator_x = content_x + 8.0f;
+    const float indicator_y = content_y + 8.0f;
+    C2D_DrawCircleSolid(indicator_x, indicator_y, 0.0f, 5.0f, cfg::CLR_QUEUE);
+  }
   if (C3D_Tex *texture = thumbs::texture_for(mod.id)) {
     const C2D_Image image{texture, &thumbs::sub_texture};
     C2D_DrawImageAt(image, content_x, content_y, 0.0f, nullptr, 1.0f, 1.0f);

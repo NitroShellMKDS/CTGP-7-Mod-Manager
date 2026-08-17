@@ -79,11 +79,17 @@ extern std::string user_message;
 
 [[nodiscard]] bool busy();
 
+[[nodiscard]] bool installing(int mod_id) noexcept;
+
 void cancel();
 
 void worker_main(void *);
 
 [[nodiscard]] bool begin(const store::ModData &mod);
+
+[[nodiscard]] bool queue_mod(const store::ModData &mod);
+
+[[nodiscard]] bool queue_selected_mod();
 
 void apply(const Result &result);
 

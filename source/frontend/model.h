@@ -35,6 +35,7 @@ enum class Priority : int {
 extern AppState state;
 extern std::vector<ModData> mods;
 extern std::vector<ModData> all_mods;
+extern std::vector<int> queued_mod_ids;
 extern std::string search_query;
 extern int window_start;
 extern int selected;
@@ -65,6 +66,16 @@ void clear_search();
 [[nodiscard]] int max_window_start() noexcept;
 
 [[nodiscard]] const ModData *selected_mod() noexcept;
+
+[[nodiscard]] bool queued(int mod_id) noexcept;
+
+void queue_selected() noexcept;
+
+void toggle_selected_queue() noexcept;
+
+void remove_queued_mod(int mod_id) noexcept;
+
+void clear_queued_mods() noexcept;
 
 [[nodiscard]] ModAction current_action() noexcept;
 

@@ -50,6 +50,13 @@ void bottom_status(const std::string &content, bool failed) {
 }
 
 std::string action_label(model::ModAction action, const store::ModData *mod) {
+  if (!model::queued_mod_ids.empty()) {
+    const std::size_t queued_count = model::queued_mod_ids.size();
+    if (queued_count > 1) {
+      return fmt::format("Install {} queued", queued_count);
+    }
+    return "Install queued";
+  }
   switch (action) {
     case model::ModAction::INSTALLED:
       return "Installed";
@@ -292,7 +299,8 @@ void bottom_browse() {
       y += ImGui::GetTextLineHeight() + 2.0f;
     }
   } else {
-    text_centered("[A] Install  [B] Uninstall  [X] Sort", cfg::IM_AUTHOR, cfg::HINT1_Y);
+    text_centered("[A] Install  [Y] Queue  [B] Uninstall  [X] Sort", cfg::IM_AUTHOR,
+                  cfg::HINT1_Y);
     text_centered(busy ? "[B] Cancel  [START] Exit" : "[START] Exit", cfg::IM_AUTHOR,
                   cfg::HINT2_Y);
   }
