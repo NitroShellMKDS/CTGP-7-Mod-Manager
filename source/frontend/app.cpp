@@ -75,9 +75,16 @@ void advance_state(bool feed_done) {
 }
 
 void handle_browse_input(u32 nav_keys, u32 pressed) {
-  // If a bottom overlay is active (e.g., About), ignore all physical button input
-  // as requested — only the on-screen Close button should dismiss the overlay.
-  if (model::bottom_overlay == model::BottomOverlay::ABOUT) {
+  if (model::bottom_overlay == model::BottomOverlay::ABOUT ||
+      install::is_uninstall_pending()) {
+    if (install::is_uninstall_pending()) {
+      if (pressed & KEY_A) {
+        install::confirm_uninstall();
+      }
+      if (pressed & KEY_B) {
+        install::cancel_uninstall_pending();
+      }
+    }
     return;
   }
 
@@ -87,16 +94,22 @@ void handle_browse_input(u32 nav_keys, u32 pressed) {
   }
   if (install::busy()) {
     if (pressed & KEY_A) {
-      (void)install::queue_selected_mod();
+      if (!install::is_uninstalling()) {
+        (void)install::queue_selected_mod();
+      }
     }
     if (pressed & KEY_B) {
-      install::cancel();
+      if (!install::is_uninstalling()) {
+        install::cancel();
+      }
     }
     if (pressed & KEY_X) {
       model::set_sort_mode(!model::sort_by_name);
     }
     if (pressed & KEY_Y) {
-      model::toggle_selected_queue();
+      if (!install::is_uninstalling()) {
+        model::toggle_selected_queue();
+      }
     }
     return;
   }
@@ -104,7 +117,7 @@ void handle_browse_input(u32 nav_keys, u32 pressed) {
     install::do_action();
   }
   if (pressed & KEY_B) {
-    install::uninstall();
+    install::request_uninstall();
   }
   if (pressed & KEY_X) {
     model::set_sort_mode(!model::sort_by_name);

@@ -20,6 +20,11 @@ extern std::atomic<bool> cancel_requested;
 extern std::atomic<int> percent;
 extern std::atomic<int64_t> bytes_done;
 extern std::atomic<int> files_written;
+extern std::vector<std::string> uninstall_files;
+extern std::atomic<int> uninstall_done;
+extern std::atomic<bool> uninstalling;
+extern std::atomic<int> uninstall_mod_id;
+extern std::atomic<bool> uninstall_pending;
 
 [[nodiscard]] bool aborting() noexcept;
 
@@ -81,6 +86,10 @@ extern std::string user_message;
 
 [[nodiscard]] bool installing(int mod_id) noexcept;
 
+[[nodiscard]] bool is_uninstalling() noexcept;
+
+[[nodiscard]] bool is_uninstall_pending() noexcept;
+
 void cancel();
 
 void worker_main(void *);
@@ -100,6 +109,16 @@ void tick();
 void do_action();
 
 void uninstall();
+
+void request_uninstall();
+
+void confirm_uninstall();
+
+void cancel_uninstall_pending();
+
+void begin_uninstall(const std::vector<std::string> &files, int mod_id);
+
+void tick_uninstall();
 
 bool init();
 

@@ -226,15 +226,12 @@ void bottom_browse() {
   // If an overlay is active, draw it full-screen and ignore other controls.
   if (model::bottom_overlay == model::BottomOverlay::ABOUT) {
     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
-    // Full replacement content for About/Credits
     static const char *about_content = "CTGP-7 Mod Manager: A 3DS homebrew app to manage CTGP-7 mods.\n\nCredits: NitroShell (Lead/Code), bonkmaykr (Code/Audio/Logo), MisakiP_ (Code/QA), Straky (Icon/QA), Orj_Osc (QA), gameonion (CTGP-7 Logo).\n\nProvided as-is. Use at your own risk.";
-    // Title
     text_centered("About / Credits", cfg::IM_GOLD, 16.0f);
     ImGui::SetCursorPos(ImVec2(12.0f, 36.0f));
     ImGui::PushTextWrapPos(12.0f + (cfg::BOT_W - 24.0f));
     ImGui::TextWrapped(about_content);
     ImGui::PopTextWrapPos();
-    // Large Close button centered at bottom
     const float close_y = cfg::BOT_H - (cfg::ACTION_BTN_H + 12.0f);
     ImGui::BeginDisabled(false);
     if (wrapped_button("##about_close", "Close", close_y, cfg::ACTION_BTN_H,
@@ -242,6 +239,23 @@ void bottom_browse() {
       model::bottom_overlay = model::BottomOverlay::NONE;
     }
     ImGui::EndDisabled();
+    ImGui::End();
+    return;
+  }
+  if (install::is_uninstall_pending()) {
+    ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
+    text_centered("Uninstall this mod?", cfg::IM_ERROR, cfg::SORT_LABEL_Y);
+    if (wrapped_button("##uninstall_yes", "Yes", cfg::ACTION_BTN_Y, cfg::ACTION_BTN_H,
+                       cfg::IM_UNINST_BG, cfg::IM_UNINST_HOT, cfg::IM_UNINST_FG,
+                       2.0f)) {
+      install::confirm_uninstall();
+    }
+    if (wrapped_button("##uninstall_no", "No", cfg::UNINST_BTN_Y, cfg::UNINST_BTN_H,
+                       cfg::IM_BTN_BG, cfg::IM_BTN_HOT, cfg::IM_GOLD, 1.0f)) {
+      install::cancel_uninstall_pending();
+    }
+    text_centered("[A] Yes  [B] No", cfg::IM_AUTHOR, cfg::HINT1_Y);
+    text_centered("[START] Exit", cfg::IM_AUTHOR, cfg::HINT2_Y);
     ImGui::End();
     return;
   }
@@ -301,8 +315,15 @@ void bottom_browse() {
   } else {
     text_centered("[A] Install  [Y] Queue  [B] Uninstall  [X] Sort", cfg::IM_AUTHOR,
                   cfg::HINT1_Y);
-    text_centered(busy ? "[B] Cancel  [START] Exit" : "[START] Exit", cfg::IM_AUTHOR,
-                  cfg::HINT2_Y);
+    if (busy) {
+      if (install::is_uninstalling()) {
+        text_centered("[START] Exit", cfg::IM_AUTHOR, cfg::HINT2_Y);
+      } else {
+        text_centered("[B] Cancel  [START] Exit", cfg::IM_AUTHOR, cfg::HINT2_Y);
+      }
+    } else {
+      text_centered("[START] Exit", cfg::IM_AUTHOR, cfg::HINT2_Y);
+    }
   }
   if (model::searching()) {
     text_centered(fmt::format("Filter: \"{}\"", model::search_query).c_str(),

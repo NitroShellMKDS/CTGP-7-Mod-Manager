@@ -159,9 +159,14 @@ void toggle_selected_queue() noexcept {
   const auto it = std::ranges::find(queued_mod_ids, mod->id);
   if (it != queued_mod_ids.end()) {
     queued_mod_ids.erase(it);
-  } else {
-    queued_mod_ids.push_back(mod->id);
+    cards_dirty = true;
+    return;
   }
+  const store::InstallRecord *record = store::installed.find(mod->id);
+  if (record != nullptr && mod->latest_file_date <= record->date) {
+    return;
+  }
+  queued_mod_ids.push_back(mod->id);
   cards_dirty = true;
 }
 

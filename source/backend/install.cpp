@@ -20,6 +20,11 @@ std::atomic<bool> cancel_requested{false};
 std::atomic<int> percent{-1};
 std::atomic<int64_t> bytes_done{0};
 std::atomic<int> files_written{0};
+std::vector<std::string> uninstall_files;
+std::atomic<int> uninstall_done{0};
+std::atomic<bool> uninstalling{false};
+std::atomic<int> uninstall_mod_id{0};
+std::atomic<bool> uninstall_pending{false};
 std::vector<Request> queued_requests;
 
 bool aborting() noexcept {
@@ -138,7 +143,7 @@ bool busy() {
     return false;
   }
   const std::scoped_lock guard{mailbox_lock};
-  return slot == Slot::REQUESTED || slot == Slot::RUNNING;
+  return (slot == Slot::REQUESTED || slot == Slot::RUNNING) || uninstalling.load(std::memory_order_relaxed);
 }
 
 bool installing(int mod_id) noexcept {
@@ -148,6 +153,90 @@ bool installing(int mod_id) noexcept {
   const std::scoped_lock guard{mailbox_lock};
   return (slot == Slot::REQUESTED || slot == Slot::RUNNING) &&
          pending.mod_id == mod_id;
+}
+
+bool is_uninstalling() noexcept {
+  return uninstalling.load(std::memory_order_relaxed);
+}
+
+bool is_uninstall_pending() noexcept {
+  return uninstall_pending.load(std::memory_order_relaxed);
+}
+
+void request_uninstall() {
+  if (busy() || is_uninstalling() || is_uninstall_pending()) {
+    return;
+  }
+  const store::ModData *mod = model::selected_mod();
+  if (mod == nullptr) {
+    return;
+  }
+  if (!store::installed.contains(mod->id)) {
+    return;
+  }
+  uninstall_pending.store(true, std::memory_order_relaxed);
+}
+
+void confirm_uninstall() {
+  uninstall_pending.store(false, std::memory_order_relaxed);
+  if (busy() || is_uninstalling()) {
+    return;
+  }
+  const store::ModData *mod = model::selected_mod();
+  if (mod == nullptr) {
+    return;
+  }
+  const store::InstallRecord *record = store::installed.find(mod->id);
+  if (record == nullptr) {
+    return;
+  }
+  const int mod_id = mod->id;
+  std::vector<std::string> files = record->files;
+  store::installed.erase(mod_id);
+  if (!store::save_installed()) {
+    status::print("Warning: could not save installed mods list.");
+  }
+  model::resort_after_change();
+  if (files.empty()) {
+    user_message.clear();
+    return;
+  }
+  begin_uninstall(files, mod_id);
+  percent.store(0, std::memory_order_relaxed);
+  user_message.clear();
+}
+
+void cancel_uninstall_pending() {
+  uninstall_pending.store(false, std::memory_order_relaxed);
+}
+
+void begin_uninstall(const std::vector<std::string> &files, int mod_id) {
+  uninstall_files = files;
+  uninstall_done.store(0, std::memory_order_relaxed);
+  uninstalling.store(true, std::memory_order_relaxed);
+  uninstall_mod_id.store(mod_id, std::memory_order_relaxed);
+}
+
+void tick_uninstall() {
+  if (!uninstalling.load(std::memory_order_relaxed)) {
+    return;
+  }
+  const int total = static_cast<int>(uninstall_files.size());
+  const int done = uninstall_done.load(std::memory_order_relaxed);
+  const int batch = std::max(1, total / 10 + (total % 10 != 0 ? 1 : 0));
+  for (int i = 0; i < batch && done + i < total; ++i) {
+    const std::string &file = uninstall_files[done + i];
+    const std::string path = fmt::format("{}{}", cfg::CTGP7_DIR, file);
+    sd::unlink_quietly(path.c_str());
+  }
+  const int new_done = std::min(done + batch, total);
+  uninstall_done.store(new_done, std::memory_order_relaxed);
+  percent.store(total > 0 ? (new_done * 100 / total) : 0, std::memory_order_relaxed);
+  if (new_done >= total) {
+    uninstalling.store(false, std::memory_order_relaxed);
+    percent.store(-1, std::memory_order_relaxed);
+    user_message.clear();
+  }
 }
 
 void cancel() {
@@ -271,6 +360,11 @@ bool queue_mod(const store::ModData &mod) {
     user_message = "Unsupported archive type (only .zip, .7z and .rar).";
     return false;
   }
+  if (const store::InstallRecord *record = store::installed.find(mod.id)) {
+    if (mod.latest_file_date <= record->date) {
+      return false;
+    }
+  }
   Request request;
   request.mod_id = mod.id;
   request.file_date = mod.latest_file_date;
@@ -338,6 +432,7 @@ void tick() {
   if (!ready) {
     return;
   }
+  tick_uninstall();
   Result result;
   bool have = false;
   {
@@ -364,6 +459,11 @@ void tick() {
 }
 
 std::string progress_label() {
+  if (is_uninstalling()) {
+    const int done = uninstall_done.load(std::memory_order_relaxed);
+    const int total = static_cast<int>(uninstall_files.size());
+    return fmt::format("Removing {}/{}...", done, total);
+  }
   switch (phase.load(std::memory_order_relaxed)) {
     case Phase::EXTRACTING: {
       const int done = percent.load(std::memory_order_relaxed);
@@ -397,7 +497,7 @@ std::string progress_label() {
 }
 
 void do_action() {
-  if (busy()) {
+  if (busy() || is_uninstalling()) {
     return;
   }
   if (!model::queued_mod_ids.empty()) {
@@ -407,6 +507,11 @@ void do_action() {
         return mod.id == mod_id;
       });
       if (it == model::mods.end()) {
+        continue;
+      }
+      const store::InstallRecord *record = store::installed.find(it->id);
+      if (record != nullptr && it->latest_file_date <= record->date) {
+        model::remove_queued_mod(mod_id);
         continue;
       }
       (void)queue_mod(*it);
@@ -424,29 +529,7 @@ void do_action() {
 }
 
 void uninstall() {
-  if (busy()) {
-    return;
-  }
-  const store::ModData *mod = model::selected_mod();
-  if (mod == nullptr) {
-    return;
-  }
-  const store::InstallRecord *record = store::installed.find(mod->id);
-  if (record == nullptr) {
-    return;
-  }
-  const std::vector<std::string> files = record->files;
-  const int mod_id = mod->id;
-  store::installed.erase(mod_id);
-  if (!store::save_installed()) {
-    status::print("Warning: could not save installed mods list.");
-  }
-  for (const std::string &file : files) {
-    const std::string path = fmt::format("{}{}", cfg::CTGP7_DIR, file);
-    sd::unlink_quietly(path.c_str());
-  }
-  user_message.clear();
-  model::resort_after_change();
+  request_uninstall();
 }
 
 bool init() {
@@ -474,6 +557,7 @@ void shutdown() {
   quit_requested.store(true, std::memory_order_relaxed);
   wake.signal();
   worker.join();
+  uninstalling.store(false, std::memory_order_relaxed);
   sd::unlink_quietly(cfg::DOWNLOAD_TMP.data());
 }
 
