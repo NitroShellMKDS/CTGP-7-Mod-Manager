@@ -40,6 +40,7 @@ extern std::string search_query;
 extern int window_start;
 extern int selected;
 extern bool sort_by_name;
+extern bool sort_reversed;
 extern std::string error_text;
 extern bool cards_dirty;
 extern u32 nav_held_key;
@@ -90,6 +91,8 @@ void handle_nav(u32 keys) noexcept;
 [[nodiscard]] u32 nav_repeat(u32 pressed, u32 held, float delta_seconds) noexcept;
 
 void set_sort_mode(bool by_name);
+
+void toggle_sort_reversed();
 
 }  // namespace model
 }  // namespace mm

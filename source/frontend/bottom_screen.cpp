@@ -192,15 +192,43 @@ void draw_sort_options() {
   const float name_width = radio + style.ItemInnerSpacing.x + ImGui::CalcTextSize("By Name").x;
   const float updated_width =
       radio + style.ItemInnerSpacing.x + ImGui::CalcTextSize("Recently Updated").x;
-  ImGui::SetCursorPos(ImVec2(
-      (cfg::BOT_W - (name_width + style.ItemSpacing.x + updated_width)) * 0.5f,
-      cfg::SORT_ROW_Y));
+  const float total_sort_width = name_width + style.ItemSpacing.x + updated_width;
+  const float total_row_width = total_sort_width + cfg::SORT_ARROW_GAP + cfg::SORT_ARROW_W;
+  const float row_start_x = (cfg::BOT_W - total_row_width) * 0.5f;
+  ImGui::SetCursorPos(ImVec2(row_start_x, cfg::SORT_ROW_Y));
   if (ImGui::RadioButton("By Name", model::sort_by_name)) {
     model::set_sort_mode(true);
   }
   ImGui::SameLine(0.0f, style.ItemSpacing.x);
   if (ImGui::RadioButton("Recently Updated", !model::sort_by_name)) {
     model::set_sort_mode(false);
+  }
+  const float arrow_x = row_start_x + total_sort_width + cfg::SORT_ARROW_GAP;
+  const float arrow_y = cfg::SORT_ROW_Y + (radio - cfg::SORT_ARROW_H) * 0.5f;
+  ImGui::SetCursorPos(ImVec2(arrow_x, arrow_y));
+  if (ImGui::InvisibleButton("##sort_arrow", ImVec2(cfg::SORT_ARROW_W, cfg::SORT_ARROW_H))) {
+    model::toggle_sort_reversed();
+  }
+  const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+  ImDrawList *list = ImGui::GetWindowDrawList();
+  const ImVec2 top_left = ImGui::GetItemRectMin();
+  const ImVec2 bottom_right = ImGui::GetItemRectMax();
+  list->AddRectFilled(top_left, bottom_right,
+                      ImGui::GetColorU32(hot ? cfg::IM_BTN_HOT : cfg::IM_BTN_BG),
+                      cfg::BTN_ROUNDING);
+  list->AddRect(top_left, bottom_right, ImGui::GetColorU32(cfg::IM_GOLD),
+                cfg::BTN_ROUNDING, 0, 1.0f);
+  const ImU32 arrow_color = ImGui::GetColorU32(hot ? cfg::IM_AMBER : cfg::IM_GOLD);
+  const float cx = (top_left.x + bottom_right.x) * 0.5f;
+  const float cy = (top_left.y + bottom_right.y) * 0.5f;
+  const float half_w = cfg::SORT_ARROW_W * 0.28f;
+  const float half_h = cfg::SORT_ARROW_H * 0.35f;
+  if (model::sort_reversed) {
+    list->AddTriangle(ImVec2(cx - half_w, cy + half_h), ImVec2(cx + half_w, cy + half_h),
+                      ImVec2(cx, cy - half_h), arrow_color, 1.5f);
+  } else {
+    list->AddTriangle(ImVec2(cx - half_w, cy - half_h), ImVec2(cx + half_w, cy - half_h),
+                      ImVec2(cx, cy + half_h), arrow_color, 1.5f);
   }
 }
 

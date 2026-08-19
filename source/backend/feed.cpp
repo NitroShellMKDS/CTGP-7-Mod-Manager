@@ -363,9 +363,17 @@ void run_pipeline() {
   if (!store::write_mod_list(cfg::BY_NAME_FILE.data(), all_mods)) {
     status::print("Warning: failed to write byname.json");
   }
+  std::ranges::sort(all_mods, std::ranges::greater{}, &ModData::name);
+  if (!store::write_mod_list(cfg::BY_NAME_REVERSED_FILE.data(), all_mods)) {
+    status::print("Warning: failed to write bynamereversed.json");
+  }
   std::ranges::sort(all_mods, std::ranges::greater{}, &ModData::latest_file_date);
   if (!store::write_mod_list(cfg::BY_UPDATED_FILE.data(), all_mods)) {
     status::print("Warning: failed to write byupdated.json");
+  }
+  std::ranges::sort(all_mods, {}, &ModData::latest_file_date);
+  if (!store::write_mod_list(cfg::BY_UPDATED_REVERSED_FILE.data(), all_mods)) {
+    status::print("Warning: failed to write byupdatedreversed.json");
   }
   const int failures = net::failed_requests.load(std::memory_order_acquire);
   if (failures > 0) {

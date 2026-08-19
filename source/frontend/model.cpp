@@ -19,6 +19,7 @@ std::string search_query;
 int window_start = 0;
 int selected = 0;
 bool sort_by_name = false;
+bool sort_reversed = false;
 std::string error_text;
 bool cards_dirty = true;
 u32 nav_held_key = 0;
@@ -82,13 +83,17 @@ void sort() {
     keys[i] = SortKey{priority_of(mods[i]), static_cast<u32>(i)};
   }
   const bool by_name = sort_by_name;
-  std::stable_sort(keys.begin(), keys.end(), [by_name](const SortKey &a, const SortKey &b) {
+  const bool reversed = sort_reversed;
+  std::stable_sort(keys.begin(), keys.end(), [by_name, reversed](const SortKey &a, const SortKey &b) {
     if (a.priority != b.priority) {
-      return a.priority > b.priority;
+      return reversed ? a.priority < b.priority : a.priority > b.priority;
     }
     const ModData &left = mods[a.index];
     const ModData &right = mods[b.index];
-    return by_name ? left.name < right.name : left.latest_file_date > right.latest_file_date;
+    if (by_name) {
+      return reversed ? left.name > right.name : left.name < right.name;
+    }
+    return reversed ? left.latest_file_date < right.latest_file_date : left.latest_file_date > right.latest_file_date;
   });
   std::vector<ModData> ordered;
   ordered.reserve(count);
@@ -309,6 +314,14 @@ void set_sort_mode(bool by_name) {
     return;
   }
   sort_by_name = by_name;
+  sort();
+  window_start = 0;
+  selected = 0;
+  cards_dirty = true;
+}
+
+void toggle_sort_reversed() {
+  sort_reversed = !sort_reversed;
   sort();
   window_start = 0;
   selected = 0;
