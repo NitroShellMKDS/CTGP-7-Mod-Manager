@@ -19,6 +19,7 @@ namespace mm {
 namespace feed {
 
 std::atomic<std::size_t> core_batch_cap{cfg::CORE_BATCH_SIZE};
+std::atomic<bool> quit_requested{false};
 
 void parse_index_records(json_object *records, std::vector<ModData> &out) {
   for (json_object *record : js::ArrayView{records}) {
@@ -94,10 +95,16 @@ void collect_pages(const std::vector<PageJob> &jobs, std::vector<PageResult> &re
   auto run_page_job = [&jobs, &results](CURL *curl, std::size_t index) {
     const PageJob &job = jobs[index];
     PageResult &out = results[index];
+    if (quit_requested.load(std::memory_order_acquire)) {
+      return;
+    }
     if (!job.sequential) {
       (void)fetch_index_page(curl, job.category_id, job.page, out);
     } else {
       for (int page = job.page; page < job.page + cfg::MAX_PAGES_PER_CAT; ++page) {
+        if (quit_requested.load(std::memory_order_acquire)) {
+          break;
+        }
         const std::size_t before = out.mods.size();
         if (!fetch_index_page(curl, job.category_id, page, out)) {
           break;
@@ -163,14 +170,14 @@ void parse_latest_file(json_object *raw_item, ModData &mod) {
 
 void lower_core_cap(std::size_t limit) noexcept {
   const std::size_t target = std::max<std::size_t>(limit, 1);
-  std::size_t current = core_batch_cap.load(std::memory_order_relaxed);
+  std::size_t current = core_batch_cap.load(std::memory_order_acquire);
   while (target < current &&
-         !core_batch_cap.compare_exchange_weak(current, target, std::memory_order_relaxed)) {
+         !core_batch_cap.compare_exchange_weak(current, target, std::memory_order_acquire)) {
   }
 }
 
 void fetch_core_range(CURL *curl, std::span<ModData> mods) {
-  if (mods.empty()) {
+  if (mods.empty() || quit_requested.load(std::memory_order_acquire)) {
     return;
   }
   const auto split = [curl](std::span<ModData> range) {
@@ -178,7 +185,7 @@ void fetch_core_range(CURL *curl, std::span<ModData> mods) {
     fetch_core_range(curl, range.first(half));
     fetch_core_range(curl, range.subspan(half));
   };
-  if (mods.size() > 1 && mods.size() > core_batch_cap.load(std::memory_order_relaxed)) {
+  if (mods.size() > 1 && mods.size() > core_batch_cap.load(std::memory_order_acquire)) {
     split(mods);
     return;
   }
@@ -248,6 +255,9 @@ void fetch_core_data(std::vector<ModData> &mods) {
   const std::size_t total = mods.size();
   const std::size_t batches = (total + cfg::CORE_BATCH_SIZE - 1) / cfg::CORE_BATCH_SIZE;
   auto run_batch = [&mods, total](CURL *curl, std::size_t index) {
+    if (quit_requested.load(std::memory_order_acquire)) {
+      return;
+    }
     const std::size_t first = index * cfg::CORE_BATCH_SIZE;
     const std::size_t count = std::min(cfg::CORE_BATCH_SIZE, total - first);
     fetch_core_range(curl, std::span{mods}.subspan(first, count));
@@ -283,8 +293,9 @@ std::vector<PageJob> plan_remaining_pages(const std::vector<PageResult> &first_p
     PageJob job;
     job.category_id = cfg::CATEGORIES[i];
     if (result.record_count > cfg::INDEX_PER_PAGE) {
-      int pages = (result.record_count + cfg::INDEX_PER_PAGE - 1) / cfg::INDEX_PER_PAGE;
-      pages = std::min(pages, cfg::MAX_PAGES_PER_CAT);
+      int record_count = std::max(0, result.record_count);
+      int pages = (record_count + cfg::INDEX_PER_PAGE - 1) / cfg::INDEX_PER_PAGE;
+      pages = std::clamp(pages, 0, cfg::MAX_PAGES_PER_CAT);
       for (int page = 2; page < pages; ++page) {
         job.page = page;
         job.sequential = false;
@@ -301,6 +312,9 @@ std::vector<PageJob> plan_remaining_pages(const std::vector<PageResult> &first_p
 }
 
 void run_pipeline() {
+  if (quit_requested.load(std::memory_order_acquire)) {
+    return;
+  }
   std::vector<ModData> all_mods;
   std::vector<PageJob> first_jobs(cfg::CATEGORIES.size());
   for (std::size_t i = 0; i < cfg::CATEGORIES.size(); ++i) {
@@ -310,12 +324,20 @@ void run_pipeline() {
   std::vector<PageResult> first_results;
   progress::begin("Scanning categories ", first_jobs.size());
   collect_pages(first_jobs, first_results);
+  if (quit_requested.load(std::memory_order_acquire)) {
+    status::print("Feed cancelled.");
+    return;
+  }
   const std::vector<PageJob> more_jobs = plan_remaining_pages(first_results);
   drain_pages(first_results, all_mods);
   if (!more_jobs.empty()) {
     std::vector<PageResult> more_results;
     progress::begin("Fetching mod pages ", more_jobs.size());
     collect_pages(more_jobs, more_results);
+    if (quit_requested.load(std::memory_order_acquire)) {
+      status::print("Feed cancelled.");
+      return;
+    }
     drain_pages(more_results, all_mods);
   }
   if (all_mods.empty()) {
@@ -324,6 +346,10 @@ void run_pipeline() {
   }
   deduplicate(all_mods);
   fetch_core_data(all_mods);
+  if (quit_requested.load(std::memory_order_acquire)) {
+    status::print("Feed cancelled.");
+    return;
+  }
   status::print("Saving...");
   const std::size_t resolved = static_cast<std::size_t>(
       std::ranges::count_if(all_mods, [](const ModData &mod) {
@@ -341,7 +367,7 @@ void run_pipeline() {
   if (!store::write_mod_list(cfg::BY_UPDATED_FILE.data(), all_mods)) {
     status::print("Warning: failed to write byupdated.json");
   }
-  const int failures = net::failed_requests.load(std::memory_order_relaxed);
+  const int failures = net::failed_requests.load(std::memory_order_acquire);
   if (failures > 0) {
     status::print("Done: {} mods, {} resolved, {} request(s) retried/failed.",
                   all_mods.size(), resolved, failures);

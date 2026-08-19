@@ -28,6 +28,7 @@ struct PageJob {
 };
 
 extern std::atomic<std::size_t> core_batch_cap;
+extern std::atomic<bool> quit_requested;
 
 void parse_index_records(json_object *records, std::vector<ModData> &out);
 

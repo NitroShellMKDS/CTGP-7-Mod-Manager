@@ -62,8 +62,8 @@ inline constexpr int AUDIO_BUF_SAMPLES = 4096;
 inline constexpr int AUDIO_MAX_CHANNELS = 2;
 inline constexpr int AUDIO_VOL = 0x50;
 inline constexpr std::size_t AUDIO_BUF_BYTES = static_cast<std::size_t>(AUDIO_BUF_SAMPLES) *
-                                               static_cast<std::size_t>(AUDIO_MAX_CHANNELS) *
-                                               sizeof(s16);
+                                              static_cast<std::size_t>(AUDIO_MAX_CHANNELS) *
+                                              sizeof(s16);
 static_assert(AUDIO_MAX_CHANNELS >= 2,
               "play() clamps to 2 channels; wave buffers must be sized for that.");
 
@@ -131,7 +131,7 @@ inline constexpr ImGuiWindowFlags SCREEN_WINDOW_FLAGS =
     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-inline constexpr const char *CHPACK_SUFFIX = ".chpack";
+inline constexpr std::string_view CHPACK_SUFFIX = ".chpack";
 inline constexpr std::size_t INSTALL_NAME_MAX = 128;
 inline constexpr std::size_t INSTALL_MAX_FILES = 64;
 inline constexpr int INSTALL_MAX_ENTRIES = 20000;
@@ -151,7 +151,7 @@ inline constexpr int THUMB_JPEG_QUALITY = 50;
 inline constexpr u16 THUMB_TEX_W = 128;
 inline constexpr u16 THUMB_TEX_H = 64;
 inline constexpr std::size_t THUMB_TEX_BYTES = static_cast<std::size_t>(THUMB_TEX_W) *
-                                               static_cast<std::size_t>(THUMB_TEX_H) * 2u;
+                                              static_cast<std::size_t>(THUMB_TEX_H) * 2u;
 static_assert((THUMB_TEX_W & (THUMB_TEX_W - 1)) == 0, "PICA200 requires power-of-two textures.");
 static_assert((THUMB_TEX_H & (THUMB_TEX_H - 1)) == 0, "PICA200 requires power-of-two textures.");
 static_assert(THUMB_TEX_W >= THUMB_IMG_W && THUMB_TEX_H >= THUMB_IMG_H,

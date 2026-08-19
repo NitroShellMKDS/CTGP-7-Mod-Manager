@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <string>
 
 namespace mm {
 namespace progress {

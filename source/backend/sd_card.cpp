@@ -29,8 +29,12 @@ std::string join(std::string_view directory, std::string_view name) {
 
 bool remove_tree(std::string_view root) {
   const PathGuard guard{path_lock};
+  std::string normalized{root};
+  if (!normalized.empty() && normalized.back() == '/') {
+    normalized.pop_back();
+  }
   std::vector<std::string> pending;
-  pending.emplace_back(root);
+  pending.emplace_back(normalized);
   while (!pending.empty()) {
     std::string current = std::move(pending.back());
     pending.pop_back();
@@ -48,7 +52,8 @@ bool remove_tree(std::string_view root) {
         continue;
       }
       const std::string full = join(current, name);
-      if (full.size() < root.size() || full.compare(0, root.size(), root) != 0) {
+      if (full.size() < normalized.size() ||
+          full.compare(0, normalized.size(), normalized) != 0) {
         continue;
       }
       struct stat info{};

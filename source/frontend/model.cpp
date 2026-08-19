@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace mm {
@@ -25,6 +27,8 @@ BottomOverlay bottom_overlay = BottomOverlay::NONE;
 
 namespace {
 
+std::string lowercase(std::string_view source);
+
 char lower_ascii(char c) noexcept {
   if (c >= 'A' && c <= 'Z') {
     return static_cast<char>(c + ('a' - 'A'));
@@ -36,20 +40,11 @@ bool contains_query(const std::string &text, const std::string &query) noexcept 
   if (query.empty()) {
     return true;
   }
-  const std::size_t qlen = query.size();
-  if (qlen > text.size()) {
+  if (query.size() > text.size()) {
     return false;
   }
-  for (std::size_t i = 0; i + qlen <= text.size(); ++i) {
-    std::size_t j = 0;
-    while (j < qlen && lower_ascii(text[i + j]) == query[j]) {
-      ++j;
-    }
-    if (j == qlen) {
-      return true;
-    }
-  }
-  return false;
+  const std::string lowered = lowercase(text);
+  return lowered.find(query) != std::string::npos;
 }
 
 std::string lowercase(std::string_view source) {
@@ -95,8 +90,7 @@ void sort() {
     const ModData &right = mods[b.index];
     return by_name ? left.name < right.name : left.latest_file_date > right.latest_file_date;
   });
-  static std::vector<ModData> ordered;
-  ordered.clear();
+  std::vector<ModData> ordered;
   ordered.reserve(count);
   for (const SortKey &key : keys) {
     ordered.push_back(std::move(mods[key.index]));

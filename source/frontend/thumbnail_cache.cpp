@@ -152,14 +152,14 @@ void worker_main(void *argument) {
     Request request;
     {
       const std::scoped_lock guard{lock};
-      if (!quit_requested.load(std::memory_order_relaxed) && queue_size > 0) {
+      if (!quit_requested.load(std::memory_order_acquire) && queue_size > 0) {
         request = queue[queue_head];
         queue_head = (queue_head + 1) % cfg::THUMB_QUEUE;
         --queue_size;
         in_flight[static_cast<std::size_t>(index)] = request.mod_id;
       }
     }
-    if (quit_requested.load(std::memory_order_relaxed)) {
+    if (quit_requested.load(std::memory_order_acquire)) {
       break;
     }
     if (request.mod_id == 0) {
@@ -169,7 +169,7 @@ void worker_main(void *argument) {
     const bool produced =
         produce(curl.get(), request.mod_id, request.url.data(),
                 publication.pixels.as<u16>());
-    if (quit_requested.load(std::memory_order_relaxed)) {
+    if (quit_requested.load(std::memory_order_acquire)) {
       break;
     }
     publication.ack.clear();
@@ -186,11 +186,11 @@ void worker_main(void *argument) {
         const std::scoped_lock guard{lock};
         taken = !publication.ready;
       }
-      if (taken || quit_requested.load(std::memory_order_relaxed)) {
+      if (taken || quit_requested.load(std::memory_order_acquire)) {
         break;
       }
     }
-    if (quit_requested.load(std::memory_order_relaxed)) {
+    if (quit_requested.load(std::memory_order_acquire)) {
       break;
     }
   }
@@ -291,7 +291,7 @@ bool init() {
     }
     return false;
   }
-  quit_requested.store(false, std::memory_order_relaxed);
+  quit_requested.store(false, std::memory_order_release);
   ready = true;
   for (std::size_t i = 0; i < workers.size(); ++i) {
     worker_contexts[i].index = static_cast<int>(i);
@@ -307,7 +307,7 @@ void shutdown() {
     return;
   }
   ready = false;
-  quit_requested.store(true, std::memory_order_relaxed);
+  quit_requested.store(true, std::memory_order_release);
   wake.signal();
   for (Publication &publication : publications) {
     publication.ack.signal();

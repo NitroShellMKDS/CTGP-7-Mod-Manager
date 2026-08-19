@@ -94,7 +94,7 @@ std::string archive_message(struct archive *handle, std::string_view what) {
   if (detail != nullptr && detail[0] != '\0') {
     return fmt::format("{}: {}", what, detail);
   }
-  return fmt::format("{}.", what);
+  return std::string(what);
 }
 
 bool write_zeros(std::FILE *file, int64_t count) noexcept {
@@ -112,7 +112,7 @@ bool write_zeros(std::FILE *file, int64_t count) noexcept {
 
 void publish_progress(struct archive *handle, int64_t archive_bytes,
                       std::size_t file_count) noexcept {
-  files_written.store(static_cast<int>(file_count), std::memory_order_relaxed);
+  files_written.store(static_cast<int>(file_count), std::memory_order_release);
   if (archive_bytes <= 0) {
     return;
   }
@@ -122,7 +122,7 @@ void publish_progress(struct archive *handle, int64_t archive_bytes,
   }
   const int64_t ratio = (static_cast<int64_t>(consumed) * 100) / archive_bytes;
   percent.store(static_cast<int>(std::clamp<int64_t>(ratio, 0, 100)),
-                std::memory_order_relaxed);
+                std::memory_order_release);
 }
 
 std::size_t extract(const char *archive_path, ExtractResult &out) {
@@ -252,7 +252,7 @@ std::size_t extract(const char *archive_path, ExtractResult &out) {
         out.message = "SD write failed (card full?).";
         return 0;
       }
-      bytes_done.store(total_bytes, std::memory_order_relaxed);
+      bytes_done.store(total_bytes, std::memory_order_release);
       publish_progress(reader.get(), archive_bytes, out.files.size());
     }
     if (!file.close()) {

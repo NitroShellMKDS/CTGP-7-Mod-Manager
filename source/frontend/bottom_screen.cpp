@@ -209,7 +209,7 @@ void draw_progress_bar() {
   list->AddRectFilled(ImVec2(cfg::BTN_X, cfg::PROG_BAR_Y),
                       ImVec2(cfg::BTN_X + cfg::BTN_W, cfg::PROG_BAR_Y + cfg::PROG_BAR_H),
                       cfg::CLR_SEP);
-  const int done = install::percent.load(std::memory_order_relaxed);
+  const int done = install::percent.load(std::memory_order_acquire);
   if (done <= 0) {
     return;
   }

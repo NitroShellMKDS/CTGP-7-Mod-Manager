@@ -148,6 +148,9 @@ bool jpeg_encode(unsigned char *rgb, unsigned char **out_buffer,
 void crop_resize(const RawImage &source, unsigned char *destination) noexcept {
   const int source_width = source.width;
   const int source_height = source.height;
+  if (source_width <= 0 || source_height <= 0) {
+    return;
+  }
   int crop_width = 0;
   int crop_height = 0;
   if (source_width * cfg::THUMB_IMG_H >= source_height * cfg::THUMB_IMG_W) {
@@ -279,7 +282,13 @@ std::atomic<bool> quit_requested{false};
 
 std::size_t download_write(void *contents, std::size_t size, std::size_t nmemb, void *userp) {
   auto *sink = static_cast<DownloadBuffer *>(userp);
-  const std::size_t total = size * nmemb;
+  std::size_t total = 0;
+  if (size != 0 && nmemb != 0) {
+    if (size > std::numeric_limits<std::size_t>::max() / nmemb) {
+      return CURL_WRITEFUNC_ERROR;
+    }
+    total = size * nmemb;
+  }
   if (total == 0) {
     return 0;
   }
@@ -304,7 +313,7 @@ std::size_t download_write(void *contents, std::size_t size, std::size_t nmemb, 
 }
 
 int download_abort(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-  return quit_requested.load(std::memory_order_relaxed) ? 1 : 0;
+  return quit_requested.load(std::memory_order_acquire) ? 1 : 0;
 }
 
 void configure_download(CURL *curl) noexcept {
@@ -331,7 +340,7 @@ bool produce(CURL *curl, int mod_id, const char *url, u16 *destination) {
   }
   if (!from_disk) {
     if (curl == nullptr || url[0] == '\0' ||
-        quit_requested.load(std::memory_order_relaxed)) {
+        quit_requested.load(std::memory_order_acquire)) {
       return false;
     }
     DownloadBuffer sink;

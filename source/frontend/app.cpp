@@ -285,7 +285,9 @@ void Platform::render(const std::string &status_line) {
 }
 
 void Platform::shutdown() noexcept {
+  feed::quit_requested.store(true, std::memory_order_release);
   feed_thread_.join();
+  draw::shutdown();
   thumbs::shutdown();
   install::shutdown();
   if (curl_ready_) {
@@ -306,7 +308,6 @@ void Platform::shutdown() noexcept {
     romfsExit();
     romfs_ready_ = false;
   }
-  draw::shutdown();
   if (imgui_ready_) {
     imgui_sw::unbind_imgui_painting();
     ImGui::DestroyContext();

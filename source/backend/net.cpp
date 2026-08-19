@@ -3,6 +3,8 @@
 #include <3ds.h>
 #include <limits>
 
+#include "core/status.h"
+
 namespace mm {
 namespace net {
 
@@ -53,11 +55,20 @@ void configure(CURL *curl) noexcept {
   curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
   CURLcode rc;
   rc = curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  assert(rc == CURLE_OK);
+  if (rc != CURLE_OK) {
+    status::print("Failed to configure SSL peer verification");
+    return;
+  }
   rc = curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-  assert(rc == CURLE_OK);
+  if (rc != CURLE_OK) {
+    status::print("Failed to configure SSL host verification");
+    return;
+  }
   rc = curl_easy_setopt(curl, CURLOPT_CAINFO, cfg::CA_BUNDLE_PATH.data());
-  assert(rc == CURLE_OK);
+  if (rc != CURLE_OK) {
+    status::print("Failed to set CA bundle path");
+    return;
+  }
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
   curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);

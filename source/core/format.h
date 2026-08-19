@@ -74,7 +74,7 @@ template <typename... Args>
 [[nodiscard]] std::string format(Spec<std::type_identity_t<Args>...> spec, const Args &...args) {
   const std::string_view text = spec.view();
   std::string out;
-  out.reserve(text.size() + sizeof...(Args) * 8);
+  out.reserve(text.size() + sizeof...(Args) * 24);
   std::size_t cursor = 0;
   const auto copy_to_placeholder = [text, &out, &cursor] {
     while (cursor < text.size()) {

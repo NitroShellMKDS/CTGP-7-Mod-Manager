@@ -53,6 +53,7 @@ bool load(const char *path) {
     return false;
   }
   if (ov_open_callbacks(file.get(), &stream, nullptr, 0, CALLBACKS) < 0) {
+    file.close();
     return false;
   }
   (void)file.release();
@@ -110,14 +111,14 @@ void thread_main(void *) {
   play(false);
   int current = 0;
   bool first_buffer = true;
-  while (!should_stop.load(std::memory_order_relaxed)) {
+  while (!should_stop.load(std::memory_order_acquire)) {
     ndspWaveBuf &buffer = wave_buffers[static_cast<std::size_t>(current)];
     if (!first_buffer) {
       while (buffer.status != NDSP_WBUF_DONE &&
-             !should_stop.load(std::memory_order_relaxed)) {
+             !should_stop.load(std::memory_order_acquire)) {
         svcSleepThread(1'000'000ULL);
       }
-      if (should_stop.load(std::memory_order_relaxed)) {
+      if (should_stop.load(std::memory_order_acquire)) {
         break;
       }
     }
@@ -142,7 +143,10 @@ void thread_main(void *) {
       continue;
     }
     if (loop_mode) {
-      ov_raw_seek(&stream, 0);
+      if (ov_raw_seek(&stream, 0) != 0) {
+        status::print("Audio: loop seek failed");
+        break;
+      }
       continue;
     }
     if (!load("romfs:/loop.ogg")) {
@@ -204,7 +208,7 @@ void init() {
 }
 
 void shutdown() {
-  should_stop.store(true, std::memory_order_relaxed);
+  should_stop.store(true, std::memory_order_release);
   worker.join();
   if (ndsp_ready) {
     ndspChnReset(0);
