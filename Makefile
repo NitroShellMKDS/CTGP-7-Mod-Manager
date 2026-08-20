@@ -26,7 +26,8 @@ BNR_AUDIO	:= app/audio.wav
 ICON		:= app/icon.png
 
 APP_TITLE	:= CTGP-7 Mod Manager
-APP_AUTHOR	:= NitroShell and Bonkmaykr
+APP_DESCRIPTION := Simple Mod Manager For CTGP-7
+APP_AUTHOR	:= NitroShell and Contributors
 
 TARGET		:= CTGP-7-Mod-Manager
 BUILD		:= build
